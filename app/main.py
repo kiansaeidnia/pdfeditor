@@ -6,8 +6,11 @@ import logging
 import mimetypes
 import os
 import secrets
+import smtplib
+import ssl
 import threading
 import zipfile
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote
@@ -23,6 +26,13 @@ from .core import EMPTY, TOOLS, Tool, ToolError, Upload, open_pdf, run_tool, saf
 
 MAX_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))
 AUTH_USER, AUTH_PASSWORD = os.environ.get("AUTH_USER", "admin"), os.environ.get("AUTH_PASSWORD", "")
+SMTP_HOST, SMTP_PORT = os.environ.get("SMTP_HOST", ""), int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER, SMTP_PASSWORD = os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "") or SMTP_USER
+MAIL_MAX_MB = 20  # most mail servers refuse larger messages
+# Applied to the UI only: the interactive API docs load their script from a CDN.
+CSP = ("default-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; style-src 'self'; "
+       "script-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 log = logging.getLogger("pdfeditor")
 # shortcut: PyMuPDF is not thread-safe, so one tool runs at a time per process; raise WORKERS for more throughput
 lock = threading.Lock()
@@ -40,7 +50,11 @@ async def guard(request: Request, call_next):
     size = request.headers.get("content-length", "")
     if size.isdigit() and int(size) > MAX_MB * 2**20:
         return JSONResponse({"detail": f"Upload is larger than {MAX_MB} MB"}, 413)
-    return await call_next(request)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if not request.url.path.startswith("/api/"):
+        response.headers["Content-Security-Policy"] = CSP
+    return response
 
 
 def read(f: UploadFile) -> Upload:
@@ -151,6 +165,48 @@ def list_tools():
 @app.get("/api/health", tags=["Meta"])
 def health():
     return {"status": "ok", "tools": len(TOOLS)}
+
+
+def mail_enabled() -> bool:
+    """E-mail needs a login password as well as SMTP settings, or anyone who can reach the app could
+    send mail from your domain."""
+    return bool(SMTP_HOST and SMTP_FROM and AUTH_PASSWORD)
+
+
+@app.get("/api/config", tags=["Meta"])
+def config():
+    """What the UI needs to know about this server."""
+    return {"name": app.title, "email": mail_enabled(), "max_upload_mb": MAX_MB}
+
+
+@app.post("/api/email", tags=["Meta"])
+def send_email(file: UploadFile,
+               to: Annotated[str, Form(pattern=r"^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$", max_length=254, description="One e-mail address")],
+               subject: Annotated[str, Form(max_length=200)] = ""):
+    """E-mail a result file as an attachment."""
+    if not mail_enabled():
+        raise HTTPException(503, "E-mail is not set up on this server (it needs SMTP settings and a login password)")
+    upload = read(file)
+    if len(upload.data) > MAIL_MAX_MB * 2**20:
+        raise HTTPException(413, f"{upload.name} is larger than {MAIL_MAX_MB} MB, too big to e-mail")
+    msg = EmailMessage()
+    msg["From"], msg["To"], msg["Subject"] = SMTP_FROM, to, subject or upload.name
+    msg.set_content(f"{upload.name} is attached.\n\nSent from {app.title}.")
+    maintype, _, subtype = (mimetypes.guess_type(upload.name)[0] or "application/octet-stream").partition("/")
+    msg.add_attachment(upload.data, maintype=maintype, subtype=subtype, filename=upload.name)
+    try:
+        tls = ssl.create_default_context()
+        connect = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30, context=tls) if SMTP_PORT == 465 else smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+        with connect as smtp:
+            if SMTP_PORT != 465:
+                smtp.starttls(context=tls)  # fails on a server without TLS, so the password never travels in the clear
+            if SMTP_USER:
+                smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(msg)
+    except (smtplib.SMTPException, OSError) as e:
+        log.warning("mail to %s failed: %s", to, e)
+        raise HTTPException(502, f"The mail server did not accept the message: {e}") from e
+    return {"sent": True}
 
 
 app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")

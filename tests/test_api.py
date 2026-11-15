@@ -75,3 +75,57 @@ def test_login_is_enforced_when_a_password_is_set(client, monkeypatch):
     assert client.get("/api/tools", auth=("admin", "wrong")).status_code == 401
     assert client.get("/api/tools", auth=("admin", "s3cret")).status_code == 200
     assert client.get("/api/health").status_code == 200  # container health checks need no login
+
+
+def test_ui_gets_security_headers_and_config(client):
+    page = client.get("/")
+    assert "script-src 'self'" in page.headers["content-security-policy"] and page.headers["x-content-type-options"] == "nosniff"
+    assert "content-security-policy" not in client.get("/api/docs").headers  # the docs page loads a CDN script
+    assert client.get("/api/config").json() == {"name": "pdfeditor", "email": False, "max_upload_mb": 200}
+
+
+class FakeSMTP:
+    sent = []
+
+    def __init__(self, host, port, timeout=None):
+        self.host, self.port, self.tls, self.user = host, port, False, None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        pass
+
+    def starttls(self, context=None):
+        self.tls = True
+
+    def login(self, user, password):
+        assert self.tls, "password sent before TLS"
+        self.user = user
+
+    def send_message(self, msg):
+        FakeSMTP.sent.append((self, msg))
+
+
+def test_email_sends_the_result_as_an_attachment(client, monkeypatch):
+    def send(**data):
+        return client.post("/api/email", files={"file": ("out.pdf", make_pdf(1))}, data=data, auth=("admin", "pw"))
+
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "pw")
+    assert send(to="a@example.com").status_code == 503  # no SMTP settings yet
+    for name, value in {"SMTP_HOST": "mail.example.com", "SMTP_USER": "bot", "SMTP_PASSWORD": "x", "SMTP_FROM": "bot@example.com"}.items():
+        monkeypatch.setattr(main, name, value)
+    monkeypatch.setattr(main.smtplib, "SMTP", FakeSMTP)
+    assert client.get("/api/config", auth=("admin", "pw")).json()["email"] is True
+    assert send(to="a@example.com", subject="Your file").json() == {"sent": True}
+    smtp, msg = FakeSMTP.sent[-1]
+    assert (smtp.host, smtp.port, smtp.tls, smtp.user) == ("mail.example.com", 587, True, "bot")
+    assert (msg["To"], msg["From"], msg["Subject"]) == ("a@example.com", "bot@example.com", "Your file")
+    attachment = next(msg.iter_attachments())
+    assert attachment.get_filename() == "out.pdf" and attachment.get_content_type() == "application/pdf"
+    for bad in ("a@example.com, b@example.com", "not-an-address", "a@example.com\nBcc: x@example.com"):
+        assert send(to=bad).status_code == 422, bad
+
+    monkeypatch.setattr(main, "AUTH_PASSWORD", "")  # without a login the app must not relay mail for anyone who can reach it
+    assert client.post("/api/email", files={"file": ("out.pdf", b"x")}, data={"to": "a@example.com"}).status_code == 503
+    assert len(FakeSMTP.sent) == 1
