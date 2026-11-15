@@ -1,0 +1,8 @@
+fastapi==0.163.1
+uvicorn[standard]==0.54.0
+python-multipart==0.0.33
+pymupdf==2.1
+pymupdf4llm==2.1
+pillow==13.0.0
+pyhanko==0.38.1
+markdown==3.11.3
