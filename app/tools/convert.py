@@ -87,8 +87,8 @@ class _CheckedRedirects(urllib.request.HTTPRedirectHandler):
 _opener = urllib.request.build_opener(_CheckedRedirects)
 
 
-def fetch(url: str, timeout: int = 10, public: bool = True, **_) -> dict:
-    """WeasyPrint resource fetcher: inline data: always, the public web only when `public`."""
+def fetch(url: str, public: bool = True, timeout: int = 10) -> tuple:
+    """(final URL, body, headers) of a resource WeasyPrint asks for: inline data: always, the public web only when `public`."""
     if url.startswith("data:"):
         resp = urllib.request.urlopen(url)  # never touches the network
     elif public:
@@ -99,17 +99,21 @@ def fetch(url: str, timeout: int = 10, public: bool = True, **_) -> dict:
     body = resp.read(MAX_FETCH + 1)
     if len(body) > MAX_FETCH:
         raise ToolError(f"{url[:80]} is too large")
-    return {"string": body, "mime_type": resp.headers.get_content_type(),
-            "encoding": resp.headers.get_param("charset"), "redirected_url": resp.url}
+    return resp.url, body, resp.headers
 
 
 def web_pdf(public: bool = True, **source) -> PDF:
     """Render HTML (string=, file_obj= or url=) with WeasyPrint. No JavaScript is run."""
     try:
         from weasyprint import HTML
+        from weasyprint.urls import URLFetcher, URLFetcherResponse
     except (ImportError, OSError) as e:  # OSError: its native libraries are missing
         raise ToolError("WeasyPrint is not installed on this server") from e
-    return pymupdf.open("pdf", HTML(url_fetcher=lambda url, **kw: fetch(url, public=public, **kw), **source).write_pdf())
+
+    class Fetcher(URLFetcher):  # WeasyPrint 70 only takes a URLFetcher; replacing fetch() keeps its own file: and http openers unused
+        def fetch(self, url, headers=None):
+            return URLFetcherResponse(*fetch(url, public))
+    return pymupdf.open("pdf", HTML(url_fetcher=Fetcher(), **source).write_pdf())
 
 
 def _eml_html(data: bytes) -> str:

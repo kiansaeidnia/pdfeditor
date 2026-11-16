@@ -1,0 +1,5 @@
+# The image needs only the app and its requirements; everything else (.venv, .git, tests, caches, .env) stays out.
+*
+!app
+!requirements.txt
+**/__pycache__
