@@ -28,7 +28,8 @@ def test_safe_name_strips_paths():
 
 @pytest.mark.parametrize("url", ["http://127.0.0.1/", "http://localhost:8080/x", "file:///etc/passwd", "ftp://example.com/",
                                  "http://169.254.169.254/latest/meta-data", "http://[::1]/", "http://10.0.0.5/", "http://192.168.1.1/",
-                                 "javascript:alert(1)", "http://"])
+                                 "javascript:alert(1)", "http://", "http://2130706433/", "http://0.0.0.0/", "http://user@127.0.0.1/",
+                                 "http://[::ffff:10.0.0.1]/", "http://[64:ff9b::7f00:1]/", "http://[2002:7f00:1::]/"])
 def test_private_and_local_addresses_are_refused(url):
     with pytest.raises(ToolError):
         check_public(url)

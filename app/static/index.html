@@ -1,1 +1,29 @@
-<!doctype html><title>pdfeditor</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>pdfeditor</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<button type="button" class="skip" id="skip">Skip to content</button>
+<header>
+  <a class="brand" id="brand" href="#/">pdfeditor</a>
+  <nav aria-label="Main">
+    <a href="#/">Tools</a>
+    <a href="#/organizer">Organize</a>
+    <a href="#/editor">Editor</a>
+    <a href="#/pipeline">Pipeline</a>
+    <a href="/api/docs">API</a>
+  </nav>
+  <input id="search" type="search" placeholder="Search tools" aria-label="Search tools" autocomplete="off">
+</header>
+<main id="main" tabindex="-1"><p>Loading…</p></main>
+<p id="announce" class="sr" role="status" aria-live="polite"></p>
+<noscript><p>This app needs JavaScript.</p></noscript>
+</body>
+</html>

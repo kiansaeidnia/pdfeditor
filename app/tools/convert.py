@@ -29,6 +29,7 @@ from ..core import PDF, Dpi, Pages, ToolError, Upload, image_pdf, open_pdf, pars
 
 TIMEOUT = int(os.environ.get("CONVERT_TIMEOUT", "300"))
 MAX_FETCH = 25 * 2**20  # per web resource
+NAT64 = ipaddress.ip_network("64:ff9b::/96")
 MUPDF_TYPES = {"png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "jp2", "jpx", "pnm", "pgm", "ppm", "pbm",
                "svg", "epub", "mobi", "fb2", "cbz", "xps", "txt"}
 PAGE_CSS = ("<style>@page{size:A4;margin:18mm}body{font:11pt/1.5 sans-serif}pre,code{font-family:monospace;"
@@ -63,6 +64,15 @@ def office(data: bytes, ext: str, target: str, infilter: str = "") -> bytes:
         return out.read_bytes()
 
 
+def _public(address: str) -> bool:
+    """A public address, also judging an IPv4 address carried inside an IPv6 one (mapped, 6to4, NAT64)."""
+    ip = ipaddress.ip_address(address)
+    inner = None
+    if ip.version == 6:
+        inner = ip.ipv4_mapped or ip.sixtofour or (ipaddress.ip_address(int(ip) & 0xFFFFFFFF) if ip in NAT64 else None)
+    return ip.is_global and (inner is None or inner.is_global)
+
+
 def check_public(url: str) -> None:
     """Refuse anything but http(s) to a public address, so pages can't make the server read local files or
     reach its internal network (SSRF).
@@ -74,7 +84,7 @@ def check_public(url: str) -> None:
         addresses = {a[4][0].split("%")[0] for a in socket.getaddrinfo(parts.hostname, None)}
     except OSError as e:
         raise ToolError(f"Can't find {parts.hostname}") from e
-    if not all(ipaddress.ip_address(a).is_global for a in addresses):
+    if not all(_public(a) for a in addresses):
         raise ToolError(f"{parts.hostname} is not a public address")
 
 

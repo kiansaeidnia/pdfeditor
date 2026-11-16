@@ -1,7 +1,7 @@
 # pdfeditor
 
-A self-hosted PDF toolkit: 59 tools behind one web page and one HTTP API. Files are processed in memory and
-never stored; every request is independent.
+A self-hosted PDF toolkit: 59 tools behind one web page and one HTTP API. Nothing is kept on the server: each
+request is processed on its own and its files are gone when the response is sent.
 
 ## Quick start
 

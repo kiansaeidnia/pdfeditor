@@ -16,6 +16,7 @@ from pydantic import TypeAdapter
 PDF = pymupdf.Document
 EMPTY = inspect.Parameter.empty
 MAX_PIXELS = 80_000_000  # per rendered page, so page size x DPI can't exhaust memory
+Image.MAX_IMAGE_PIXELS = MAX_PIXELS // 2  # Pillow refuses uploaded pictures above twice this, same reason
 FONT = pymupdf.Font("helv")  # TextWriter falls back to MuPDF's built-in fonts for glyphs Helvetica lacks
 PERMS = {
     "print": pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_PRINT_HQ,
