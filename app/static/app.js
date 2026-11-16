@@ -3,6 +3,8 @@ const ORDER = ["Pages", "Convert", "Edit", "Security", "Inspect"];
 const DPI = 110, PT = 72 / DPI;  // editor page pictures, and the size of one of their pixels in PDF points
 let config = {name: "pdfeditor", email: false, max_upload_mb: 200};
 let tools = [], uid = 0, resultUrl;
+let carry = [];  // the files being worked on: they follow the user from tool to tool
+let cat = "";    // category filter on the home page
 
 const main = document.getElementById("main"), search = document.getElementById("search");
 const result = h("section", {class: "result", "aria-label": "Result", hidden: true});  // shared by every view
@@ -28,8 +30,12 @@ const size = n => n < 1e6 ? `${Math.max(1, Math.round(n / 1e3))} kB` : `${(n / 1
 const byId = id => tools.find(t => t.id === id);
 const statusEl = () => h("p", {class: "status", role: "status", "aria-live": "polite"});
 const pwInput = () => h("input", {type: "password", autocomplete: "off"});
-const pwField = input => field("Password of the PDF (if it has one)", input, "Results are always saved without a password.");
+const pwField = input => h("details", {class: "pw"}, h("summary", {}, "This PDF has a password"),
+  field("Password", input, "Results are always saved without a password."));
 const say = text => { document.getElementById("announce").textContent = text; };  // for screen readers only
+// preferences in localStorage; where that is unavailable (private mode, blocked) they simply don't stick
+const pref = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
+const setPref = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* not kept */ } };
 
 function tell(status, text, error = false) {
   status.className = error ? "status error" : "status";
@@ -74,16 +80,25 @@ async function busy(btn, status, job) {
   btn.disabled = true;
   btn.setAttribute("aria-busy", "true");
   tell(status, "Working…");
+  // the seconds are shown through CSS from an attribute, so screen readers are not told every tick
+  const began = Date.now(), tick = setInterval(() => { status.dataset.elapsed = ` ${Math.round((Date.now() - began) / 1000)} s`; }, 1000);
   try {
     const out = await job();
     if (!(out instanceof Response)) tell(status, out ?? "");
     else if (status.isConnected) {  // not connected: the user left this view, so the file is dropped
       showResult(await download(out));
-      tell(status, "Done. The result is below.");
+      tell(status, "Done.");
     }
   } catch (e) {
     tell(status, e.message, true);
+    const box = /password/i.test(e.message) && status.closest("form")?.querySelector("details.pw");
+    if (box) {  // the file turned out to be protected: show the field the user now needs
+      box.open = true;
+      box.querySelector("input").focus();
+    }
   }
+  clearInterval(tick);
+  delete status.dataset.elapsed;
   btn.disabled = false;
   btn.removeAttribute("aria-busy");
 }
@@ -139,22 +154,29 @@ function paramFields(t, given = {}) {
   };
 }
 
-// File chooser with drag and drop and an ordered list of what was chosen
+// File chooser with drag and drop and an ordered list of what was chosen. It starts with the files the user
+// is already working on (those of a kind it accepts) and keeps `carry` up to date for the next tool.
 function filePicker({accept = "", multiple = true, hint = "", onchange} = {}) {
-  let items = [];  // {k: key for keepFocus, f: File}
+  const fits = f => !accept || accept.split(",").some(a => f.name.toLowerCase().endsWith(a.trim()));
+  let items = carry.filter(fits).slice(0, multiple ? undefined : 1).map(f => ({k: ++uid, f}));  // {k: key for keepFocus, f: File}
   const input = h("input", {type: "file", class: "sr", id: `f${++uid}`, accept, multiple, onchange: () => { add(input.files); input.value = ""; }});
   const list = h("ul", {class: "files", "aria-label": "Chosen files"});
+  const changed = tell => {
+    carry = items.map(it => it.f);
+    draw();
+    if (tell) onchange?.();
+  };
   const add = files => {
     const fresh = [...files].map(f => ({k: ++uid, f}));
     if (!fresh.length) return;
     items = multiple ? [...items, ...fresh] : fresh.slice(0, 1);
-    draw();
-    onchange?.();
+    changed(true);
   };
   const draw = () => keepFocus(list, () => list.replaceChildren(...items.map((it, i) => h("li", {},
     h("span", {}, it.f.name), h("small", {}, size(it.f.size)),
-    multiple && i > 0 && iconButton("↑", `Move ${it.f.name} up`, `${it.k}up`, () => { items.splice(i - 1, 2, it, items[i - 1]); draw(); }),
-    iconButton("×", `Remove ${it.f.name}`, `${it.k}rm`, () => { items.splice(i, 1); draw(); onchange?.(); })))), input);
+    multiple && i > 0 && iconButton("↑", `Move ${it.f.name} up`, `${it.k}up`, () => { items.splice(i - 1, 2, it, items[i - 1]); changed(); }),
+    iconButton("×", `Remove ${it.f.name}`, `${it.k}rm`, () => { items.splice(i, 1); changed(true); })))), input);
+  draw();
   const drop = h("div", {class: "drop",
     ondragover: e => { e.preventDefault(); drop.classList.add("over"); },
     ondragleave: () => drop.classList.remove("over"),
@@ -169,13 +191,18 @@ function filePicker({accept = "", multiple = true, hint = "", onchange} = {}) {
 function showResult(r) {
   if (resultUrl) URL.revokeObjectURL(resultUrl);
   resultUrl = null;
-  result.hidden = !r;
-  result.replaceChildren();
-  if (!r) return;
+  result.hidden = false;
+  result.classList.toggle("none", !r);  // CSS shows the empty panel only beside a tool form on wide screens
+  result.replaceChildren(h("h2", {}, "Result"));
+  if (!r) return result.append(h("p", {class: "empty"}, "Your result will show up here, with a preview and a download button."));
   const {name, blob} = r, type = blob.type, url = resultUrl = URL.createObjectURL(blob);
   const pre = h("pre", {tabIndex: 0});  // focusable so a long preview can be scrolled from the keyboard
-  result.append(h("h2", {}, "Result"),
-    h("p", {}, h("a", {class: "button", href: url, download: name}, `Download ${name}`), ` ${size(blob.size)}`));
+  const onward = /^(application\/pdf|image\/)/.test(type) && button("Use in another tool", () => {
+    carry = [new File([blob], name, {type})];
+    cat = search.value = "";
+    location.hash = "#/";
+  });
+  result.append(h("div", {class: "row"}, h("a", {class: "button", href: url, download: name}, `Download ${name}`), onward, h("small", {}, size(blob.size))));
   if (type.startsWith("application/json")) {
     blob.text().then(t => { try { t = JSON.stringify(JSON.parse(t), null, 2); } catch { /* show it as it came */ } pre.textContent = t; });
     result.append(pre);
@@ -208,13 +235,21 @@ function showResult(r) {
 
 function home() {
   const q = search.value.trim().toLowerCase();
-  const found = tools.filter(t => t.category !== "Internal" && `${t.title} ${t.description} ${t.id}`.toLowerCase().includes(q));
+  const listed = tools.filter(t => t.category !== "Internal");
+  const found = listed.filter(t => (!cat || t.category === cat) && `${t.title} ${t.description} ${t.id}`.toLowerCase().includes(q));
   const first = d => /^.*?[.!?](?=\s+[A-Z"]|$)/.exec(d)?.[0] ?? d;  // first sentence; "e.g. 2" does not end one
-  const sections = [...new Set([...ORDER, ...found.map(t => t.category)])].map(c => [c, found.filter(t => t.category === c)])
-    .filter(([, list]) => list.length).map(([c, list]) => h("section", {}, h("h2", {}, c), h("ul", {class: "cards"},
-      list.map(t => h("li", {}, h("a", {href: `#/tool/${t.id}`}, h("strong", {}, t.title), h("span", {}, first(t.description.replace(/\s+/g, " ")))))))));
+  const group = (name, list) => h("section", {}, h("h2", {}, name, h("small", {}, ` ${list.length}`)), h("ul", {class: "cards"},
+    list.map(t => h("li", {"data-c": t.category}, h("a", {href: `#/tool/${t.id}`}, h("strong", {}, t.title), h("span", {}, first(t.description.replace(/\s+/g, " "))))))));
+  const cats = [...new Set([...ORDER, ...listed.map(t => t.category)])];
+  const chips = h("div", {class: "chips", role: "group", "aria-label": "Show category"}, ["", ...cats].map(c =>
+    button(c || "All", () => { cat = c; route(); main.querySelector(".chips [aria-pressed=true]")?.focus(); }, {"aria-pressed": String(cat === c)})));
+  const recent = q || cat ? [] : pref("recent", []).map(byId).filter(t => t && t.category !== "Internal");
+  const sections = cats.map(c => [c, found.filter(t => t.category === c)]).filter(([, list]) => list.length).map(([c, list]) => group(c, list));
   if (q) say(`${found.length} tools match.`);
-  return h("div", {}, h("h1", {class: "sr"}, "Tools"), sections.length ? sections : h("p", {}, `No tools match “${search.value.trim()}”.`));
+  return h("div", {}, h("h1", {class: "sr"}, "Tools"),
+    filePicker({hint: "Optional: start with your files. They follow you into whichever tool you open."}).el, chips,
+    recent.length ? group("Recently used", recent) : null,
+    sections.length ? sections : h("p", {}, `No tools match “${search.value.trim()}”.`));
 }
 
 function toolView(id) {
@@ -232,9 +267,12 @@ function toolView(id) {
     busy(run, status, async () => {
       if (picker && !picker.files.length) throw new Error("Choose at least one file.");
       const more = Object.fromEntries(t.files.map((x, i) => [x.name, [...extras[i].files]]));
-      return api(`/api/tools/${t.id}`, formData({files: picker ? picker.files : [], ...fields.values(), ...more, password: pw ? pw.value : ""}));
+      const res = await api(`/api/tools/${t.id}`, formData({files: picker ? picker.files : [], ...fields.values(), ...more, password: pw ? pw.value : ""}));
+      setPref("recent", [t.id, ...pref("recent", []).filter(id => id !== t.id)].slice(0, 6));
+      return res;
     });
   }},
+    h("p", {class: "crumb"}, h("a", {href: "#/"}, "← All tools"), ` · ${t.category}`),
     h("h1", {}, t.title), h("p", {}, t.description.replace(/\s+/g, " ")), picker && picker.el,
     t.files.map((x, i) => field(label(x.name), extras[i], x.kind === "files" ? "You can choose several files." : "", x.required)),
     fields.el, pw && pwField(pw), h("div", {class: "row"}, run), status);
@@ -245,6 +283,7 @@ function toolView(id) {
 function pdfOpener(open) {
   const pw = pwInput(), status = statusEl(), go = h("button", {}, "Open");
   const picker = filePicker({accept: ".pdf", multiple: false, onchange: () => busy(go, status, () => open(picker.files[0], pw.value))});
+  if (picker.files.length) queueMicrotask(() => go.click());  // arrived with a file already chosen: open it straight away
   return h("form", {class: "panel", onsubmit: e => {
     e.preventDefault();
     busy(go, status, async () => {
@@ -287,9 +326,13 @@ function organizer() {
           act("+", "Duplicate", () => order.splice(i + 1, 0, {k: ++uid, p: it.p})),
           act("×", "Delete", () => order.splice(i, 1))));
     })));
-    apply.hidden = !thumbs.length;
+    apply.hidden = bulk.hidden = !thumbs.length;
     apply.disabled = !order.length;
   }
+  const bulk = h("div", {class: "row"},
+    button("Rotate all", () => { for (const p of new Set(order.map(it => it.p))) turn.set(p, ((turn.get(p) ?? 0) + 90) % 360); draw(); }),
+    button("Reverse order", () => { order.reverse(); draw(); }),
+    button("Start over", () => { order = thumbs.map((_, p) => ({k: ++uid, p})); turn.clear(); draw(); }));
 
   const opener = pdfOpener(async (f, pw) => {
     [file, password, thumbs, order] = [f, pw, [], []];
@@ -304,7 +347,7 @@ function organizer() {
     return `${data.count} pages. Use the buttons under each page, or drag pages, then apply.`;
   });
   draw();
-  return h("div", {}, h("h1", {}, "Organize pages"), opener, grid, h("div", {class: "row"}, apply), status);
+  return h("div", {}, h("h1", {}, "Organize pages"), opener, bulk, grid, h("div", {class: "row"}, apply), status);
 }
 
 // The server keeps a form field under 1 MB and the editor sends pictures inside one, so a chosen image is made
@@ -331,7 +374,7 @@ function editor() {
   const ops = [], cache = new Map(), pics = new Map(), stamps = {};  // stamps: the picture waiting to be placed, per mode
   const prefs = {Draw: ["#000000", 2], Highlight: ["#ffe600", 14]};  // colour and size last used in each mode
   const status = statusEl(), where = h("span", {});
-  const cv = h("canvas", {class: "page", "aria-label": "The page being edited. Edits are placed with a mouse, pen or finger."}), ctx = cv.getContext("2d");
+  const cv = h("canvas", {class: "page fit", "aria-label": "The page being edited. Edits are placed with a mouse, pen or finger."}), ctx = cv.getContext("2d");
   const color = h("input", {type: "color", value: "#000000"});
   const amount = h("input", {type: "number", min: 0.5, max: 500, step: 0.5, value: 14});
   const sized = max => Math.min(+amount.value > 0 ? +amount.value : 2, max);
@@ -349,6 +392,7 @@ function editor() {
 
   // Redraw the page picture and every pending edit on it, the way the server will draw them
   function paint() {
+    undo.textContent = ops.length ? `Undo (${ops.length})` : "Undo";
     if (!shown) return;
     ctx.setTransform(1 / PT, 0, 0, 1 / PT, 0, 0);  // from here on the canvas is drawn on in PDF points
     ctx.drawImage(shown, 0, 0, cv.width * PT, cv.height * PT);
@@ -418,10 +462,12 @@ function editor() {
   cv.addEventListener("pointerdown", e => {
     if (!shown || e.button) return;
     const p = at(e), base = {page, color: color.value};
-    if (mode === "Text") {
-      const text = prompt("Text to add here");
-      if (text?.trim()) ops.push({type: "text", ...base, points: [p], text, size: sized(500)});
-      return paint();
+    if (mode === "Text") {  // type right on the page, in a box where the text will sit
+      placeText(true);  // text still being typed elsewhere is kept, not wiped by this click
+      const k = cv.clientWidth / cv.width / PT;  // CSS pixels per point at the current zoom
+      Object.assign(typing, {hidden: false, value: "", at: p, size: sized(500), ink: color.value});
+      Object.assign(typing.style, {left: `${p[0] * k}px`, top: `${p[1] * k}px`, color: color.value, font: `${typing.size * k}px Helvetica, Arial, sans-serif`});
+      return setTimeout(() => typing.focus());  // after this click has finished moving the focus
     }
     if (mode === "Draw") live = {type: "ink", ...base, points: [p], width: sized(100)};
     else if (mode !== "Image" && mode !== "Signature") live = {type: mode.toLowerCase(), ...base, rect: [...p, ...p]};
@@ -447,6 +493,25 @@ function editor() {
   };
   cv.addEventListener("pointerup", finish);
   cv.addEventListener("pointercancel", finish);
+
+  const typing = h("input", {class: "typing", type: "text", hidden: true, "aria-label": "Text to add. Enter places it, Escape cancels.",
+    onblur: () => placeText(true),
+    onkeydown: e => { if (e.key === "Enter") { e.preventDefault(); placeText(true); } else if (e.key === "Escape") placeText(false); }});
+  function placeText(keep) {
+    if (typing.hidden) return;
+    typing.hidden = true;
+    if (keep && typing.value.trim()) ops.push({type: "text", page, color: typing.ink, points: [typing.at], text: typing.value, size: typing.size});
+    paint();
+  }
+  const fit = button("Fit to screen", () => fit.setAttribute("aria-pressed", String(cv.classList.toggle("fit"))), {"aria-pressed": "true"});
+  const onKey = e => {  // Ctrl+Z / Cmd+Z undoes the last edit while the editor is open
+    if (!cv.isConnected) return document.removeEventListener("keydown", onKey);
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) {
+      e.preventDefault();
+      undo.click();
+    }
+  };
+  document.addEventListener("keydown", onKey);
 
   const pad = h("canvas", {class: "pad", width: 500, height: 180, "aria-label": "Signature pad. Draw with a mouse, pen or finger."}), ink = pad.getContext("2d");
   const stroke = e => {
@@ -499,7 +564,7 @@ function editor() {
   const work = h("div", {hidden: true},
     h("div", {class: "toolbar"}, h("div", {class: "row", role: "group", "aria-label": "Tool"}, modeButtons),
       field("Colour", color), field("Size (text size in points, or pen width)", amount), h("div", {class: "row"}, undo, save)),
-    imagePanel, signPanel, h("div", {class: "row"}, prev, where, next), status, cv);
+    imagePanel, signPanel, h("div", {class: "row"}, prev, where, next, fit), status, h("div", {class: "stage"}, cv, typing));
 
   const opener = pdfOpener(async (f, pw) => {
     [file, password, shown] = [f, pw, null];
@@ -574,6 +639,7 @@ function pipeline() {
 function route(e) {
   const [, name = "", arg = ""] = location.hash.split("/");
   const view = {tool: toolView, organizer, editor, pipeline}[name] ?? home;
+  main.className = view === toolView && byId(arg) && byId(arg).category !== "Internal" ? "split" : "";  // form and result side by side
   showResult(null);
   main.replaceChildren(view(arg), result);
   document.title = [main.querySelector("h1:not(.sr)")?.textContent, config.name].filter(Boolean).join(" · ");
@@ -581,7 +647,8 @@ function route(e) {
   for (const a of document.querySelectorAll("nav a")) {
     if (a.getAttribute("href") === here) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   }
-  if (e && document.activeElement !== search) main.focus();  // on navigation, not on first load or while searching
+  if (e) scrollTo(0, 0);  // a new view starts at its top
+  if (e && document.activeElement !== search) main.focus({preventScroll: true});  // on navigation, not on first load or while searching
 }
 
 async function start() {
@@ -590,6 +657,19 @@ async function start() {
   try { tools = await (await api("/api/tools")).json(); }
   catch (e) { return main.replaceChildren(h("p", {class: "status error", role: "alert"}, `The tool list could not be loaded. ${e.message}`)); }
   search.addEventListener("input", () => { if (location.hash.length > 2) location.hash = "#/"; else route(); });
+  search.addEventListener("keydown", e => { if (e.key === "Escape") { search.value = ""; search.dispatchEvent(new Event("input")); } });
+  window.addEventListener("keydown", e => {  // "/" jumps to the search box, as on most sites
+    if (e.key === "/" && !e.ctrlKey && !e.metaKey && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) { e.preventDefault(); search.focus(); }
+  });
+  const theme = document.getElementById("theme"), THEMES = ["system", "light", "dark"];
+  const setTheme = t => {
+    if (t === "system") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
+    theme.title = `Colour theme: ${t}. Press to change.`;
+    theme.setAttribute("aria-label", theme.title);
+    setPref("theme", t);
+  };
+  theme.addEventListener("click", () => setTheme(THEMES[(THEMES.indexOf(pref("theme", "system")) + 1) % 3]));
+  setTheme(THEMES.includes(pref("theme")) ? pref("theme") : "system");
   document.getElementById("skip").addEventListener("click", () => main.focus());
   // a file dropped next to a drop zone must not make the browser leave the page
   for (const type of ["dragover", "drop"]) window.addEventListener(type, e => e.preventDefault());

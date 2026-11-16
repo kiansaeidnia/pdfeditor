@@ -54,6 +54,7 @@ async def guard(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     if not request.url.path.startswith("/api/"):
         response.headers["Content-Security-Policy"] = CSP
+        response.headers["Cache-Control"] = "no-cache"  # revalidate, so an update never pairs an old page with a new script
     return response
 
 

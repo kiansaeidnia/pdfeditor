@@ -80,6 +80,7 @@ def test_login_is_enforced_when_a_password_is_set(client, monkeypatch):
 def test_ui_gets_security_headers_and_config(client):
     page = client.get("/")
     assert "script-src 'self'" in page.headers["content-security-policy"] and page.headers["x-content-type-options"] == "nosniff"
+    assert page.headers["cache-control"] == "no-cache"
     assert "content-security-policy" not in client.get("/api/docs").headers  # the docs page loads a CDN script
     assert client.get("/api/config").json() == {"name": "pdfeditor", "email": False, "max_upload_mb": 200}
 
