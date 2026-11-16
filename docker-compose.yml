@@ -7,7 +7,8 @@ services:
         OCR_LANGS: ${OCR_LANGS:-eng}  # Tesseract languages baked into the image, e.g. "eng deu fra"
     image: pdfeditor
     ports:
-      - "8080:8080"
+      # Reachable from this machine only by default. BIND=0.0.0.0 opens it to the network: set AUTH_PASSWORD first.
+      - "${BIND:-127.0.0.1}:${PORT:-8080}:8080"
     restart: unless-stopped
     environment:
       APP_NAME: ${APP_NAME:-pdfeditor}          # title shown in the UI and the API docs

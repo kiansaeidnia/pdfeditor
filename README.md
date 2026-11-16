@@ -10,6 +10,8 @@ docker compose up -d --build
 ```
 
 Open <http://localhost:8080>. The first build downloads LibreOffice and takes a few minutes; the image is about 1.2 GB.
+Out of the box it only answers on the machine it runs on. To reach it from other devices, set `AUTH_PASSWORD` and
+`BIND=0.0.0.0` in `.env`.
 
 ## Configuration
 
@@ -17,6 +19,8 @@ Set these in a `.env` file next to `docker-compose.yml` (copy `.env.example`).
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `BIND` | `127.0.0.1` | Address the app is published on. The default is this machine only; `0.0.0.0` opens it to the network. |
+| `PORT` | `8080` | Port it is published on. |
 | `AUTH_USER` | `admin` | Login name. |
 | `AUTH_PASSWORD` | empty | Login password. **Empty means no login at all.** |
 | `MAX_UPLOAD_MB` | `200` | Largest accepted request. |
