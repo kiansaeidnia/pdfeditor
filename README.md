@@ -100,7 +100,7 @@ Open <http://localhost:8080>. The first build downloads LibreOffice and takes a 
 
 ### Ready-made image
 
-Every commit on `main` that passes CI is published to the private registry at `registry.saeidnia.com` as
+Every commit on `main` that passes CI is published to the registry at `registry.saeidnia.com` as
 `pdfeditor:latest` and `pdfeditor:<short commit hash>`. A git tag such as `v1.2.0` is published under its own name.
 Pull requests never publish.
 
