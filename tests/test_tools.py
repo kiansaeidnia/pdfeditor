@@ -329,12 +329,144 @@ def test_stamp_and_page_numbers(run):
 
 @pytest.mark.parametrize("rotation", [0, 90])
 def test_find_and_replace(run, rotation):
+    from app.core import page_spans
     out = pdf(run("replace-text", make_pdf(2, rotation=rotation), find="Page", replace="Sheet"))
     words = sorted(out[0].get_text("words"))  # left to right, in page coordinates
     assert [w[4] for w in words] == ["Sheet", "1"]
-    assert abs(words[0][0] - 72) < 2 and abs(words[0][3] - words[1][3]) < 2  # same start, same baseline
     assert words[0][2] < words[1][0]  # shrunk to fit: does not run into the next word
+    starts = sorted(s["origin"] for s in page_spans(out[0]))
+    assert abs(starts[0][0] - 72) < 2 and abs(starts[0][1] - starts[1][1]) < 0.5  # same start, same baseline
     run("replace-text", make_pdf(1), find="absent", replace="x", expect=400)
+
+
+def styled_pdf(rotation=0, crop=False) -> bytes:
+    """A bold red label and a Times amount on one line, a Helvetica line below."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Invoice total:", fontname="hebo", fontsize=11, color=(0.8, 0, 0))
+    page.insert_text((160, 100), "1,250.00 AUD", fontname="tiro", fontsize=11)
+    page.insert_text((72, 140), "Second line stays", fontname="helv", fontsize=14)
+    if crop:
+        page.set_cropbox(pymupdf.Rect(20, 30, 500, 700))
+    page.set_rotation(rotation)
+    return doc.tobytes()
+
+
+def same_family(new_font: str, old_font: str) -> bool:
+    """The new text is in the old font, the same font installed here, or its twin."""
+    from app.core import TWINS, _family
+    old = _family(old_font)[0]
+    return _family(new_font)[0] in (old, *TWINS.get(old, []))
+
+
+@pytest.mark.parametrize("rotation,crop", [(0, False), (90, False), (0, True), (270, True)])
+def test_edit_text_keeps_its_look(run, rotation, crop):
+    from app.core import page_spans
+    src = styled_pdf(rotation, crop)
+    listed = run("text-spans", src, page=1).json()["spans"]
+    target = next(s for s in listed if s["text"] == "Invoice total:")
+    assert target["bold"] and target["size"] == 11 and target["color"] == "#cc0000" and target["uses"]
+    before = {s["text"].strip(): s for s in page_spans(pymupdf.open("pdf", src)[0])}
+    ops = [{"type": "retext", "page": 0, "rect": target["rect"], "text": "Amount due:"}]
+    out = pdf(run("edit", src, ops=json.dumps(ops)))
+    after = {s["text"].strip(): s for s in page_spans(out[0])}
+    old, new = before["Invoice total:"], after["Amount due:"]
+    assert abs(new["origin"][0] - old["origin"][0]) < 0.6 and abs(new["origin"][1] - old["origin"][1]) < 0.6  # same baseline
+    assert new["size"] == pytest.approx(11, abs=0.05) and new["color"] == old["color"]
+    assert same_family(new["font"], old["font"]) and "bold" in new["font"].lower(), new["font"]
+    assert "Invoice" not in out[0].get_text()
+    assert after["1,250.00 AUD"]["font"] == before["1,250.00 AUD"]["font"]  # the rest of the line is untouched
+    assert after["Second line stays"]["font"] == before["Second line stays"]["font"]
+
+    gone = pdf(run("edit", src, ops=json.dumps([{**ops[0], "text": ""}])))  # empty: the text is deleted
+    assert "Invoice" not in gone[0].get_text() and "1,250.00" in gone[0].get_text()
+    run("edit", src, ops=json.dumps([{**ops[0], "rect": [0, 0, 1, 1]}]), expect=400)  # nothing there
+
+
+def test_find_and_replace_keeps_the_font(run):
+    from app.core import page_spans
+    out = pdf(run("replace-text", styled_pdf(), find="1,250.00", replace="980.50"))
+    new = next(s for s in page_spans(out[0]) if "980.50" in s["text"])
+    assert same_family(new["font"], "Times-Roman"), new["font"]
+
+
+@needs("soffice")
+def test_edit_text_in_a_real_document(run, tmp_path):
+    """A LibreOffice PDF: subset fonts with no character map, as most PDFs have."""
+    import subprocess
+    from app.core import page_spans
+    (tmp_path / "in.html").write_text('<p style="font-family:\'Liberation Sans\'; font-size:11pt"><b>Invoice total:</b> 1,250.00 AUD</p>')
+    subprocess.run(["soffice", "--headless", "--convert-to", "pdf:writer_web_pdf_Export", "--outdir", str(tmp_path),
+                    str(tmp_path / "in.html")], check=True, capture_output=True, timeout=120)
+    src = (tmp_path / "in.pdf").read_bytes()
+    target = next(s for s in run("text-spans", src).json()["spans"] if s["text"] == "Invoice total:")
+    assert target["font"] == "LiberationSans-Bold" and target["uses"] == "Liberation Sans Bold"
+    out = pdf(run("edit", src, ops=json.dumps([{"type": "retext", "page": 0, "rect": target["rect"], "text": "Zebra quiz:"}])))
+    spans = {s["text"].strip(): s["font"] for s in page_spans(out[0])}
+    assert spans["Zebra quiz:"] == "LiberationSans-Bold" and spans["1,250.00 AUD"] == "LiberationSans"
+
+
+INK, PAPER = (0.1, 0.1, 0.45), (1, 0.97, 0.85)  # navy on cream, so a scanned edit has to get both colours right
+
+
+def scan_pdf(lines=("Invoice total: 1,250.00 AUD", "Second line here"), rotation=0, ocr_layer=True) -> bytes:
+    """A 'scan': a picture of the page, with (as OCR leaves it) the words again as invisible text, one at a time."""
+    page = pymupdf.open().new_page()
+    page.draw_rect(page.rect, color=None, fill=PAPER)
+    for i, line in enumerate(lines):
+        page.insert_text((72, 100 + 40 * i), line, fontname="helv", fontsize=14, color=INK)
+    scan = pymupdf.open()
+    out = scan.new_page(width=page.rect.width, height=page.rect.height)
+    out.insert_image(out.rect, stream=page.get_pixmap(dpi=150).tobytes("png"))
+    if ocr_layer:
+        for i, line in enumerate(lines):
+            x = 72
+            for word in line.split():
+                out.insert_text((x, 100 + 40 * i), word + " ", fontname="helv", fontsize=14, render_mode=3)
+                x += pymupdf.get_text_length(word + " ", "helv", 14)
+    out.set_rotation(rotation)
+    return scan.tobytes()
+
+
+def near(hex_colour: str, rgb01, slack=40) -> bool:
+    return all(abs(int(hex_colour[1 + 2 * i:3 + 2 * i], 16) - v * 255) <= slack for i, v in enumerate(rgb01))
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_edit_scanned_text(run, rotation):
+    from app.core import page_spans
+    src = scan_pdf(rotation=rotation)
+    listed = run("text-spans", src).json()["spans"]
+    first = listed[0]
+    assert [s["text"] for s in listed] == ["Invoice total: 1,250.00 AUD", "Second line here"]  # words joined into lines
+    assert first["scanned"] and near(first["paper"], PAPER) and near(first["color"], INK)
+    assert 12 < first["size"] < 17  # from the line's height: OCR's own sizes are about 20% small
+    out = pdf(run("edit", src, ops=json.dumps([{"type": "retext", "page": 0, "rect": first["rect"], "text": "Paid"}])))
+    page = out[0]
+    assert "Invoice" not in page.get_text() and "Paid" in page.get_text() and "Second line here" in page.get_text()
+    new = next(s for s in page_spans(page) if s["text"].strip() == "Paid")
+    assert new["alpha"] != 0 and near("#%06x" % new["color"], INK)  # visible now, in the scan's ink
+    # where the old, longer words were, only paper shows now
+    gone = (pymupdf.Rect(130, 86, 250, 104) * page.rotation_matrix).normalize()
+    pixels = Image.frombytes("RGB", *(lambda p: ((p.width, p.height), p.samples))(page.get_pixmap(clip=gone, dpi=72)))
+    assert all(near("#%02x%02x%02x" % c, PAPER, 30) for c in pixels.getdata())
+
+
+def test_find_and_replace_over_a_scan(run):
+    out = pdf(run("replace-text", scan_pdf(), find="1,250.00", replace="980.50"))
+    assert "980.50" in out[0].get_text() and "1,250.00" not in out[0].get_text()
+
+
+@needs("ocrmypdf", "tesseract")
+def test_ocr_one_page_then_edit_it(run):
+    two = pymupdf.open("pdf", scan_pdf(ocr_layer=False))
+    two.insert_pdf(pymupdf.open("pdf", scan_pdf(("Page two of the scan",), ocr_layer=False)))
+    out = pdf(run("ocr", two.tobytes(), pages="2"))
+    assert out[0].get_text().strip() == "" and "two of the scan" in out[1].get_text()  # only the page asked for
+    listed = run("text-spans", out.tobytes(), page=2).json()["spans"]
+    assert listed and all(s["scanned"] for s in listed)
+    edited = pdf(run("edit", out.tobytes(), ops=json.dumps([{"type": "retext", "page": 1, "rect": listed[0]["rect"], "text": "Edited"}])))
+    assert "Edited" in edited[1].get_text() and "two of the scan" not in edited[1].get_text()
 
 
 def test_highlight_adds_annotations(run):

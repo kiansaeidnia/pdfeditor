@@ -231,10 +231,12 @@ def _ocrmypdf(doc: PDF, *options: str) -> bytes:
 @tool("OCR (make scans searchable)", "Convert")
 def ocr(doc: PDF,
         language: Annotated[str, Form(pattern=r"^[A-Za-z_]+(\+[A-Za-z_]+)*$", description="Tesseract language codes, e.g. eng or eng+deu")] = "eng",
-        mode: Literal["skip-text", "redo-ocr", "force-ocr"] = "skip-text", deskew: bool = False):
+        mode: Literal["skip-text", "redo-ocr", "force-ocr"] = "skip-text", deskew: bool = False, pages: Pages = "all"):
     """Recognise the text on scanned pages and add it as an invisible, searchable layer. skip-text leaves
     pages that already have text alone; force-ocr rasterises and redoes everything."""
-    return ("_ocr.pdf", _ocrmypdf(doc, "-l", language, f"--{mode}", "--output-type", "pdf", *(["--deskew"] if deskew else [])))
+    chosen = sorted(set(parse_pages(pages, len(doc))))
+    only = ["--pages", ",".join(str(i + 1) for i in chosen)] if len(chosen) < len(doc) else []
+    return ("_ocr.pdf", _ocrmypdf(doc, "-l", language, f"--{mode}", "--output-type", "pdf", *only, *(["--deskew"] if deskew else [])))
 
 
 @tool("PDF to PDF/A", "Convert")

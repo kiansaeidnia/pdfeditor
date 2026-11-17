@@ -5,7 +5,8 @@ ARG OCR_LANGS="eng"
 
 # LibreOffice: the -nogui packages convert headless without pulling in a desktop; draw carries the PDF importer.
 # pango + harfbuzz-subset are what WeasyPrint loads at run time.
-# Fonts: DejaVu, Liberation (metric-compatible with Arial/Times/Courier) and Droid Sans Fallback for CJK (4 MB;
+# Fonts: DejaVu, Liberation (metric-compatible with Arial/Times/Courier), Carlito and Caladea (the same for Calibri
+# and Cambria, so edited text in Word documents keeps its look) and Droid Sans Fallback for CJK (4 MB;
 # swap in fonts-noto-cjk, about 90 MB, for proper CJK typography).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -13,7 +14,7 @@ RUN apt-get update \
       tesseract-ocr $(printf 'tesseract-ocr-%s ' $(echo "$OCR_LANGS" | tr _ -)) \
       ghostscript \
       libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 \
-      fonts-dejavu-core fonts-liberation fonts-droid-fallback \
+      fonts-dejavu-core fonts-liberation fonts-droid-fallback fonts-crosextra-carlito fonts-crosextra-caladea \
  && rm -rf /var/lib/apt/lists/*
 
 # LibreOffice and fontconfig need a writable home; /data keeps the settings chosen in the first-run setup

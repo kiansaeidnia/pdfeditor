@@ -39,7 +39,7 @@
 |---|---|
 | 🧰 **59 tools, 5 categories** | Pages, Convert, Edit, Security and Inspect. Every tool is a form in the browser and an endpoint in the API. |
 | 🗂️ **Page organizer** | See every page as a thumbnail. Drag, rotate, duplicate and delete, then download the result. |
-| ✍️ **Editor** | Type, draw, highlight, white out and redact right on the page. Place images and a hand-drawn signature. |
+| ✍️ **Editor** | Change the document's own text and keep its font, size and colour. Type, draw, highlight, white out and redact right on the page. Place images and a hand-drawn signature. |
 | ⛓️ **Pipelines** | Chain tools so each step's output feeds the next, in the browser or with one API call. |
 | 📎 **Files follow you** | Drop files once on the home page; they come along into whichever tool you open. A result can go straight into the next tool. |
 | 👀 **Results beside the form** | PDFs, images, text, JSON and HTML are previewed next to the form, with a download button. |
@@ -213,7 +213,7 @@ Open a category to see what is in it. The **API id** is the last part of the too
 | **PDF to text, Markdown, HTML or XML** | `pdf-to-text` | Extract the text. |
 | **PDF tables to CSV** | `pdf-to-csv` | Find tables and save each one as a CSV file. |
 | **PDF to Word, PowerPoint or OpenDocument** | `pdf-to-office` | Convert with LibreOffice. |
-| **OCR (make scans searchable)** | `ocr` | Recognise the text on scanned pages and add it as an invisible, searchable layer. |
+| **OCR (make scans searchable)** | `ocr` | Recognise the text on scanned pages (all, or the ones chosen) and add it as an invisible, searchable layer. |
 | **PDF to PDF/A** | `pdf-to-pdfa` | Convert to PDF/A, the self-contained format for long-term archiving. |
 | **Convert to image PDF** | `rasterize` | Replace every page with a picture of itself: nothing can be selected, copied or recovered afterwards. |
 
@@ -226,7 +226,7 @@ Open a category to see what is in it. The **API id** is the last part of the too
 |---|---|---|
 | **Add stamp** | `stamp` | Place text or an image - a logo, a scanned signature, a header or footer - at a fixed spot on each page. |
 | **Add page numbers** | `page-numbers` | Number the selected pages in order, including Bates numbering. |
-| **Find and replace text** | `replace-text` | Swap every occurrence of a phrase (ignoring case). |
+| **Find and replace text** | `replace-text` | Swap every occurrence of a phrase (ignoring case), keeping the font, colour and baseline of the text it replaces. |
 | **Highlight text** | `highlight` | Mark every occurrence of the given text with a highlighter annotation. |
 | **Edit metadata** | `metadata` | Set the document properties. |
 | **Edit bookmarks** | `bookmarks` | Replace the table of contents shown in the reader's sidebar. |
@@ -306,15 +306,24 @@ Crop, Add page numbers, Add watermark and so on) only look at which pages are li
 - **Search** from anywhere with <kbd>/</kbd>; <kbd>Esc</kbd> clears it. The home page also remembers the tools you used last.
 - **Page organizer:** move pages by dragging or with the arrow buttons, rotate, duplicate, delete, or use
   "Rotate all" and "Reverse order". Nothing changes until you press "Apply and download".
-- **Editor:** pick a mode (Text, Draw, Highlight, Whiteout, Redact, Image, Signature), then click or drag on the
-  page. <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes the last edit. Redaction removes what is under the box for good.
+- **Editor:** pick a mode (Edit text, Add text, Draw, Highlight, Whiteout, Redact, Image, Signature), then click or
+  drag on the page. <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes the last edit. Redaction removes what is under the box for good.
+- **Edit text:** dashed boxes show the text you can change; click one, type, press <kbd>Enter</kbd>. The new text
+  keeps the old one's size, colour, bold or italic and baseline, and its font: the font in the document where it
+  can, else the same font installed on the server, else a twin with the same letter widths (Arial and Helvetica →
+  Liberation Sans, Times → Liberation Serif, Courier → Liberation Mono, Calibri → Carlito, Cambria → Caladea,
+  Palatino, Century Schoolbook, Bookman and Avant Garde → their URW clones). The status line names the font used.
+  Text doesn't reflow: a much longer line can run into what follows it.
+- **Scanned pages** are read automatically (OCR) the first time Edit text shows them, one page at a time, which takes a
+  few seconds. A line of a scan is then edited as a whole: the old letters are painted over in the paper's colour
+  and the new ones written in the scan's ink colour, at the size measured from the scan, in Liberation Sans.
 - **Pipeline builder:** add steps, set each one's options, reorder them. The plan is shown as JSON you can copy,
   paste back later, or send to the API as it is.
 
 ## HTTP API
 
 Interactive documentation for every tool is at `/api/docs`. `GET /api/tools` lists the tools and their settings as
-JSON, plus two internal helpers (`edit` and `preview`) that the editor and the page organizer use.
+JSON, plus three internal helpers (`edit`, `preview` and `text-spans`) that the editor and the page organizer use.
 
 ```bash
 # one tool: rotate pages 1-3 by 90 degrees

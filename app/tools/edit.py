@@ -8,8 +8,9 @@ from fastapi import Form
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from pydantic import BaseModel, Field, TypeAdapter
 
-from ..core import (FONT, PDF, Anchor, Color, Dpi, Opacity, Pages, Text, ToolError, Upload, draw_image, draw_text,
-                    find_text, image_pdf, layer_for, parse_pages, place, put, rgb, tool)
+from ..core import (FONT, PDF, Anchor, Color, Dpi, Opacity, Pages, Text, ToolError, Upload, cover_scan, draw_image,
+                    draw_text, find_text, font_for, image_pdf, layer_for, page_spans, parse_pages, place, put, rgb,
+                    scan_look, tool, write_like)
 
 Factor = Annotated[float, Form(ge=0, le=5, description="1 = unchanged")]
 
@@ -46,9 +47,9 @@ def page_numbers(doc: PDF, position: Anchor = "bottom-center",
 
 @tool("Find and replace text", "Edit")
 def replace_text(doc: PDF, find: str, replace: str, pages: Pages = "all"):
-    """Swap every occurrence of a phrase (ignoring case). The new text is set in Helvetica on the original
-    baseline, at the original size or smaller if it is longer than the old text, so it suits short
-    corrections rather than rewriting paragraphs."""
+    """Swap every occurrence of a phrase (ignoring case). The new text keeps the look of the text it replaces: its
+    font (or the same font installed here, or a twin that measures the same), colour and baseline, at the original
+    size or smaller if it is longer than the old text. It suits corrections rather than rewriting paragraphs."""
     total = 0
     for i in set(parse_pages(pages, len(doc))):
         page = doc[i]
@@ -56,17 +57,24 @@ def replace_text(doc: PDF, find: str, replace: str, pages: Pages = "all"):
         for q in page.search_for(find, quads=True):
             spans = [s for b in page.get_text("dict", clip=q.rect)["blocks"] for line in b.get("lines", []) for s in line["spans"]]
             # shortcut: assumes horizontal text; lines written at an angle get a level replacement
-            size, color, baseline = (spans[0]["size"], spans[0]["color"], spans[0]["origin"][1]) if spans else (q.rect.height * 0.7, 0, q.rect.y1 - q.rect.height * 0.2)
-            hits.append((q.rect, size, color, baseline))
+            span = dict(spans[0]) if spans else {"size": q.rect.height * 0.7, "color": 0, "font": "Helvetica", "flags": 0,
+                                                 "origin": (0, q.rect.y1 - q.rect.height * 0.2)}
+            span["origin"] = (q.rect.x0, span["origin"][1])  # the match may start part-way into the span
+            if span.get("alpha") == 0:  # OCR text over a scan: what shows is the picture, so it gets painted over
+                span.update(bbox=tuple(q.rect), size=q.rect.height, font="Helvetica", flags=0, scanned=True)
+                span = scan_look(page, span)  # before the redaction below: it reads the picture only, which stays
+            hits.append((q.rect, span))
             page.add_redact_annot(q, fill=False, cross_out=False)
         if not hits:
             continue
         page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE)
         layer = layer_for(page)
-        for box, size, color, baseline in hits:
-            size *= min(1, box.width / FONT.text_length(replace, fontsize=size))
-            centre = pymupdf.Point(box.x0 + FONT.text_length(replace, fontsize=size) / 2, baseline - size * 0.35) * page.rotation_matrix
-            draw_text(layer, centre.x, centre.y, replace, size, f"#{color:06x}", angle=-page.rotation)
+        for box, span in hits:
+            if span.get("scanned"):
+                span = cover_scan(layer, page, span)  # the size and colours were read from the scan above
+            font = font_for(span["font"], span["flags"])[0]
+            size = span["size"] * min(1, box.width / max(font.text_length(replace, fontsize=span["size"]), 1e-6))
+            write_like(layer, page, span, replace, size)
         place(page, page.rect, layer.parent, 0)
         total += len(hits)
     if not total:
@@ -94,11 +102,11 @@ def highlight(doc: PDF, find: Annotated[str, Form(description="Text to mark, one
 
 class Op(BaseModel):
     """One edit from the visual editor. Coordinates are points on the page as displayed."""
-    type: Literal["text", "ink", "image", "redact", "whiteout", "highlight"]
+    type: Literal["text", "ink", "image", "redact", "whiteout", "highlight", "retext"]
     page: int = Field(ge=0)
-    rect: tuple[float, float, float, float] | None = None  # image, redact, whiteout, highlight
+    rect: tuple[float, float, float, float] | None = None  # image, redact, whiteout, highlight; retext: the text's box
     points: list[tuple[float, float]] = []                 # ink: the stroke; text: [top-left corner]
-    text: str = ""
+    text: str = Field("", max_length=2000)  # text; retext: the new text, written in the old text's font
     size: float = Field(14, gt=0, le=500)
     width: float = Field(1.5, gt=0, le=100)
     color: str = Field("#000000", pattern="^#[0-9a-fA-F]{6}$")
@@ -107,19 +115,38 @@ class Op(BaseModel):
 
 @tool("Apply edits", "Internal")
 def edit(doc: PDF, ops: Text):
-    """Apply a JSON list of edits (text, ink, image, redact, whiteout, highlight). Used by the visual editor."""
+    """Apply a JSON list of edits (text, ink, image, redact, whiteout, highlight, retext). Used by the visual editor."""
     todo = TypeAdapter(list[Op]).validate_json(ops)
     if any(op.page >= len(doc) for op in todo):
         raise ToolError("An edit refers to a page this document doesn't have")
     boxes = {id(op): (pymupdf.Rect(op.rect) * doc[op.page].derotation_matrix).normalize() for op in todo if op.rect}
+    # retext: find the text being changed while it is still there; it is removed below and written anew in its font
+    retext, spans = [], {}
+    for op in todo:
+        if op.type == "retext" and op.rect:
+            found = spans.setdefault(op.page, page_spans(doc[op.page]))
+            best = max(found, key=lambda s: (pymupdf.Rect(s["bbox"]) & boxes[id(op)]).get_area(), default=None)
+            if best is None or (pymupdf.Rect(best["bbox"]) & boxes[id(op)]).is_empty:
+                raise ToolError(f"The text to change on page {op.page + 1} isn't there any more")
+            retext.append((op, best))
     for op in todo:  # redact first, or it would also erase edits placed on top of the box
         if op.type == "redact" and op.rect:
             doc[op.page].add_redact_annot(boxes[id(op)], fill=rgb(op.color))
     for i in {op.page for op in todo if op.type == "redact"}:
         doc[i].apply_redactions()
+    for op, span in retext:  # only the characters go: images and drawings under them stay
+        r = pymupdf.Rect(span["bbox"])
+        doc[op.page].add_redact_annot(r + (0.5, r.height * 0.25, -0.5, -r.height * 0.25), fill=False, cross_out=False)
+    for i in {op.page for op, _ in retext}:
+        doc[i].apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE)
     layers = {}  # page number -> scratch page holding that page's drawings
+    for op, span in retext:
+        layer = layers.setdefault(op.page, layer_for(doc[op.page]))
+        if span.get("scanned"):  # the letters that show are part of the scan's picture: paint over them first
+            span = cover_scan(layer, doc[op.page], span)
+        write_like(layer, doc[op.page], span, op.text)
     for op in todo:
-        if op.type == "redact":
+        if op.type in ("redact", "retext"):
             continue
         layer = layers.setdefault(op.page, layer_for(doc[op.page]))
         if op.type == "text" and op.points and op.text.strip():
@@ -138,6 +165,29 @@ def edit(doc: PDF, ops: Text):
         if layer.get_contents():
             place(doc[i], doc[i].rect, layer.parent, 0)
     return doc
+
+
+@tool("Text on a page", "Internal")
+def text_spans(doc: PDF, page: Annotated[int, Form(ge=1)] = 1):
+    """The page's text, piece by piece, with its font, size and colour, and the font new text in each piece will use.
+    Boxes are in points on the page as displayed. Used by the editor's Edit text mode."""
+    if page > len(doc):
+        raise ToolError(f"This document has {len(doc)} pages")
+    p = doc[page - 1]
+    out = []
+    for s in page_spans(p):
+        r = (pymupdf.Rect(s["bbox"]) * p.rotation_matrix).normalize()
+        if s.get("scanned"):  # the colours and size the new text will get, so the editor's preview shows them too
+            s = scan_look(p, s)
+        paper = s.get("paper")
+        o = pymupdf.Point(s["origin"]) * p.rotation_matrix
+        out.append({"text": s["text"], "rect": [round(v, 2) for v in r], "baseline": [round(o.x, 2), round(o.y, 2)],
+                    "size": round(s["size"], 2),
+                    "color": "#%06x" % s["color"], "font": s["font"].split("+", 1)[-1], "uses": font_for(s["font"], s["flags"])[1],
+                    "bold": bool(s["flags"] & 16), "italic": bool(s["flags"] & 2), "serif": bool(s["flags"] & 4),
+                    "mono": bool(s["flags"] & 8), "scanned": bool(s.get("scanned")),
+                    "paper": paper and "#%02x%02x%02x" % tuple(round(v * 255) for v in paper)})
+    return {"page": page, "spans": out}
 
 
 @tool("Edit metadata", "Edit")

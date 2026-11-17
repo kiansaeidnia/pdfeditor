@@ -378,13 +378,15 @@ async function shrink(file) {
 }
 
 function editor() {
-  const MODES = ["Text", "Draw", "Highlight", "Whiteout", "Redact", "Image", "Signature"];
-  const TIPS = {Text: "Click where the text should start.", Draw: "Drag to draw.", Highlight: "Drag a rectangle to highlight it.",
+  const MODES = ["Edit text", "Add text", "Draw", "Highlight", "Whiteout", "Redact", "Image", "Signature"];
+  const TIPS = {"Edit text": "Click any text on the page to change it. It keeps its font, size and colour. Scanned pages are read first.",
+    "Add text": "Click where the new text should start.", Draw: "Drag to draw.", Highlight: "Drag a rectangle to highlight it.",
     Whiteout: "Drag a rectangle to paint it white.", Redact: "Drag a rectangle: what is under it is removed for good.",
     Image: "Choose an image, then drag a rectangle where it should go.",
     Signature: "Draw your signature, press Use, then drag a rectangle where it should go."};
-  let file, password, count = 0, page = 0, shown = null, live = null, start, mode = "Text", inked = false;
-  const ops = [], cache = new Map(), pics = new Map(), stamps = {};  // stamps: the picture waiting to be placed, per mode
+  let file, password, count = 0, page = 0, shown = null, live = null, start, mode = "Edit text", inked = false;
+  let spans = null;  // the shown page's text, for Edit text: [{text, rect, baseline, size, color, font, uses, bold, ...}]
+  const ops = [], cache = new Map(), pics = new Map(), stamps = {}, texts = new Map();  // stamps: the picture waiting to be placed, per mode
   const prefs = {Draw: ["#000000", 2], Highlight: ["#ffe600", 14]};  // colour and size last used in each mode
   const status = statusEl(), where = h("span", {});
   const cv = h("canvas", {class: "page fit", "aria-label": "The page being edited. Edits are placed with a mouse, pen or finger."}), ctx = cv.getContext("2d");
@@ -403,6 +405,54 @@ function editor() {
     return cache.get(n);
   }
 
+  function pageText(n) {
+    if (!texts.has(n)) {
+      texts.set(n, api("/api/tools/text-spans", formData({files: file, page: n + 1, password})).then(r => r.json()).then(d => d.spans)
+        .catch(e => { texts.delete(n); throw e; }));
+    }
+    return texts.get(n);
+  }
+  // A scanned page has no text to edit until OCR reads it. Each page is read once, on its own, the first time it is
+  // shown in Edit text; the read copy of the document then replaces the open one, so later pages and Save use it.
+  const scanned = new Set();  // pages already read with OCR in this document
+  let reading = Promise.resolve();  // one OCR at a time, each starting from the copy the one before produced
+  function readScan(n) {
+    const run = reading.then(async () => {
+      const f = file;
+      const res = await api("/api/tools/ocr", formData({files: f, pages: n + 1, password}));
+      const blob = await res.blob();
+      if (file !== f) return false;  // another document was opened meanwhile
+      file = new File([blob], f.name, {type: "application/pdf"});
+      password = "";  // results are always saved without a password
+      texts.clear();
+      return true;
+    });
+    reading = run.catch(() => {});
+    return run;
+  }
+  async function loadText() {
+    if (mode !== "Edit text" || !file) return;
+    const n = page, f = file;
+    try {
+      const found = await pageText(n);
+      if (page !== n || file !== f) return;
+      if (!found.length && !scanned.has(n)) {
+        scanned.add(n);
+        tell(status, "This page is a scan, so its text is being read first (OCR). That takes a few seconds…");
+        if (await readScan(n) && page === n) await loadText();
+        return;
+      }
+      spans = found;
+      paint();
+      if (!found.length) tell(status, "No text found on this page, even by reading the scan.", true);
+      else if (found.some(s => s.scanned)) tell(status, "Text read from the scan. Click a line to change it: the new text is written over the scan, in its ink colour.");
+    } catch (e) { tell(status, `The text on this page can't be read: ${e.message}`, true); }
+  }
+  // the look of a piece of text in CSS, at `size` CSS pixels: its own font if this computer has it, else a lookalike
+  const look = (s, size) => `${s.italic ? "italic " : ""}${s.bold ? "bold " : ""}${size}px "${s.uses}", ` +
+    (s.mono ? '"Courier New", monospace' : s.serif ? '"Times New Roman", Times, serif' : "Arial, Helvetica, sans-serif");
+  const sameBox = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 0.01);
+
   // Redraw the page picture and every pending edit on it, the way the server will draw them
   function paint() {
     undo.textContent = ops.length ? `Undo (${ops.length})` : "Undo";
@@ -410,11 +460,19 @@ function editor() {
     ctx.setTransform(1 / PT, 0, 0, 1 / PT, 0, 0);  // from here on the canvas is drawn on in PDF points
     ctx.drawImage(shown, 0, 0, cv.width * PT, cv.height * PT);
     const mine = ops.filter(o => o.page === page);
-    // the server applies redactions before everything else, so they go first here too
-    for (const o of [...mine.filter(o => o.type === "redact"), ...mine.filter(o => o.type !== "redact"), ...(live ? [live] : [])]) {
+    // the server applies redactions and text changes before everything else, so they go first here too
+    const first = o => o.type === "redact" || o.type === "retext";
+    for (const o of [...mine.filter(first), ...mine.filter(o => !first(o)), ...(live ? [live] : [])]) {
       ctx.globalAlpha = o.type === "highlight" ? 0.35 : 1;
       ctx.fillStyle = ctx.strokeStyle = o.type === "whiteout" ? "#ffffff" : o.color ?? "#000000";
-      if (o.type === "text") {
+      if (o.type === "retext") {  // the old text covered, the new one written on its baseline in a lookalike font
+        const [x0, y0, x1, y1] = o.rect, pad = o.span.scanned ? [1.5, (y1 - y0) * 0.15] : [0.5, 0];
+        ctx.fillStyle = o.span.paper ?? "#ffffff";
+        ctx.fillRect(x0 - pad[0], y0 - pad[1], x1 - x0 + 2 * pad[0], y1 - y0 + 2 * pad[1]);
+        ctx.fillStyle = o.color;
+        ctx.font = look(o.span, o.span.size);
+        ctx.fillText(o.text, o.span.baseline[0], o.span.baseline[1]);
+      } else if (o.type === "text") {
         ctx.font = `${o.size}px Helvetica, Arial, sans-serif`;
         ctx.fillText(o.text, o.points[0][0], o.points[0][1] + o.size * 0.85);  // the server's baseline: 0.85 of the size below the top
       } else if (o.type === "ink") {
@@ -433,6 +491,13 @@ function editor() {
       }
     }
     ctx.globalAlpha = 1;
+    if (mode === "Edit text" && spans) {  // dashed boxes show what can be changed
+      ctx.strokeStyle = "rgba(36, 86, 201, 0.55)";
+      ctx.lineWidth = 0.6;
+      ctx.setLineDash([2, 2]);
+      for (const s of spans) ctx.strokeRect(s.rect[0] - 1, s.rect[1] - 0.5, s.rect[2] - s.rect[0] + 2, s.rect[3] - s.rect[1] + 1);
+      ctx.setLineDash([]);
+    }
   }
 
   async function show(n) {
@@ -447,10 +512,12 @@ function editor() {
       const img = await pageImage(n);
       if (page !== n || file !== f) return;  // the user moved on while this page was loading
       shown = img;
+      spans = null;
       cv.width = img.naturalWidth;
       cv.height = img.naturalHeight;
       paint();
       tell(status, TIPS[mode]);
+      loadText();
     } catch (e) {
       tell(status, e.message, true);
     }
@@ -464,6 +531,8 @@ function editor() {
     imagePanel.hidden = m !== "Image";
     signPanel.hidden = m !== "Signature";
     tell(status, TIPS[m]);
+    paint();
+    loadText();
   }
 
   // pointer position in PDF points: CSS pixels -> canvas pixels (canvas.width / client width) -> points (72 / dpi)
@@ -475,7 +544,22 @@ function editor() {
   cv.addEventListener("pointerdown", e => {
     if (!shown || e.button) return;
     const p = at(e), base = {page, color: color.value};
-    if (mode === "Text") {  // type right on the page, in a box where the text will sit
+    if (mode === "Edit text") {  // change existing text in a box over it
+      placeText(true);
+      retext(true);
+      const s = spans?.find(s => p[0] >= s.rect[0] - 1 && p[0] <= s.rect[2] + 1 && p[1] >= s.rect[1] - 1 && p[1] <= s.rect[3] + 1);
+      if (!s) return tell(status, spans ? "There's no text there. Click on a word inside a dashed box." : "Still reading this page's text…");
+      const k = cv.clientWidth / cv.width / PT, before = ops.find(o => o.type === "retext" && o.page === page && sameBox(o.rect, s.rect));
+      Object.assign(retyping, {hidden: false, value: before ? before.text : s.text, span: s});
+      Object.assign(retyping.style, {left: `${(s.rect[0] - 1) * k}px`, top: `${(s.rect[1] - 1) * k}px`, color: s.color, font: look(s, s.size * k),
+        width: `${Math.max((s.rect[2] - s.rect[0]) * k + 48, 120)}px`});
+      const same = s.font.replace(/[^a-z0-9]/gi, "").toLowerCase() === s.uses.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      tell(status, (s.scanned ? `Text read from the scan. The new text is written over it in ${s.uses}, in the scan's ink colour.`
+        : `${s.font}, ${s.size} pt. ` + (same ? "Its own font is kept." : `Written in ${s.uses}, which matches it.`)) +
+        " Enter keeps the change, Escape cancels.");
+      return setTimeout(() => { retyping.focus(); retyping.select(); });
+    }
+    if (mode === "Add text") {  // type right on the page, in a box where the text will sit
       placeText(true);  // text still being typed elsewhere is kept, not wiped by this click
       const k = cv.clientWidth / cv.width / PT;  // CSS pixels per point at the current zoom
       Object.assign(typing, {hidden: false, value: "", at: p, size: sized(500), ink: color.value});
@@ -514,6 +598,21 @@ function editor() {
     if (typing.hidden) return;
     typing.hidden = true;
     if (keep && typing.value.trim()) ops.push({type: "text", page, color: typing.ink, points: [typing.at], text: typing.value, size: typing.size});
+    paint();
+  }
+  const retyping = h("input", {class: "typing", type: "text", hidden: true, "aria-label": "The text, to change. Enter keeps the change, Escape cancels.",
+    onblur: () => retext(true),
+    onkeydown: e => { if (e.key === "Enter") { e.preventDefault(); retext(true); } else if (e.key === "Escape") retext(false); }});
+  // A changed piece of text is one edit, however often it is changed; changed back, the edit goes
+  function retext(keep) {
+    if (retyping.hidden) return;
+    retyping.hidden = true;
+    const s = retyping.span, i = ops.findIndex(o => o.type === "retext" && o.page === page && sameBox(o.rect, s.rect));
+    if (keep && retyping.value !== (i >= 0 ? ops[i].text : s.text)) {
+      if (i >= 0) ops.splice(i, 1);
+      if (retyping.value !== s.text) ops.push({type: "retext", page, rect: s.rect, text: retyping.value, color: s.color, size: s.size, span: s});
+      tell(status, TIPS[mode]);
+    }
     paint();
   }
   const fit = button("Fit to screen", () => fit.setAttribute("aria-pressed", String(cv.classList.toggle("fit"))), {"aria-pressed": "true"});
@@ -569,7 +668,7 @@ function editor() {
     if (o.page === page) paint(); else show(o.page);
   });
   const save = button("Save PDF", () => busy(save, status, async () => {
-    const body = JSON.stringify(ops);
+    const body = JSON.stringify(ops.map(({span, ...o}) => o));  // the preview's copy of the old text stays here
     if (!ops.length) throw new Error("Nothing to save yet: add an edit first.");
     if (body.length > 1_000_000) throw new Error("These edits are too large to send in one go (the pictures add up to more than 1 MB). Undo one, save, and add the rest to the saved file.");
     return api("/api/tools/edit", formData({files: file, ops: body, password}));
@@ -577,12 +676,14 @@ function editor() {
   const work = h("div", {hidden: true},
     h("div", {class: "toolbar"}, h("div", {class: "row", role: "group", "aria-label": "Tool"}, modeButtons),
       field("Colour", color), field("Size (text size in points, or pen width)", amount), h("div", {class: "row"}, undo, save)),
-    imagePanel, signPanel, h("div", {class: "row"}, prev, where, next, fit), status, h("div", {class: "stage"}, cv, typing));
+    imagePanel, signPanel, h("div", {class: "row"}, prev, where, next, fit), status, h("div", {class: "stage"}, cv, typing, retyping));
 
   const opener = pdfOpener(async (f, pw) => {
-    [file, password, shown] = [f, pw, null];
+    [file, password, shown, spans] = [f, pw, null, null];
     ops.length = 0;
     cache.clear();
+    texts.clear();
+    scanned.clear();
     work.hidden = true;
     if (!f) return "";
     const data = await (await api("/api/tools/preview", formData({files: f, dpi: 20, pages: 1, password: pw}))).json();

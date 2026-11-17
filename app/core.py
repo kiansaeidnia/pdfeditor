@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -295,6 +296,173 @@ def find_text(page, find: str, regex: bool = False) -> list:
         except re.error as e:
             raise ToolError(f"Bad regular expression: {e}") from e
     return [q for t in terms if t for q in page.search_for(t, quads=True)]
+
+
+# --- writing text in the document's own font ------------------------------------------------------
+# Fonts embedded in most PDFs are subsets without a character map, so new text can't be typed in them. New text uses
+# the embedded font when it can, else the same font installed here, else a metric-compatible twin, else a lookalike.
+
+FONT_DIRS = (os.environ["FONT_DIRS"].split(os.pathsep) if "FONT_DIRS" in os.environ
+             else ["/usr/share/fonts", "/usr/local/share/fonts", "C:/Windows/Fonts"])
+_STYLE = re.compile(r"(semibold|demibold|extrabold|bold|black|heavy|demi|bd|italic|oblique|ita|regular|roman|book|light|medium|psmt|mt|ps)")
+# a family -> families that look and measure the same, best first (names as fonts call themselves)
+_TWINS = {
+    "arial": ["helvetica", "liberationsans", "nimbussans"], "helvetica": ["arial", "liberationsans", "nimbussans"],
+    "helveticaneue": ["arial", "liberationsans"],
+    "timesnewroman": ["times", "liberationserif", "nimbusroman"], "times": ["timesnewroman", "liberationserif", "nimbusroman"],
+    "couriernew": ["courier", "liberationmono", "nimbusmonops"], "courier": ["couriernew", "liberationmono", "nimbusmonops"],
+    "calibri": ["carlito"], "cambria": ["caladea"], "arialnarrow": ["nimbussansnarrow"],
+    "palatino": ["p052"], "palatinolinotype": ["p052"], "bookantiqua": ["p052"], "centuryschoolbook": ["c059"],
+    "bookmanoldstyle": ["urwbookman"], "centurygothic": ["urwgothic"], "avantgarde": ["urwgothic"],
+    "verdana": ["dejavusans"], "tahoma": ["dejavusans"], "segoeui": ["liberationsans"], "georgia": ["dejavuserif"],
+    "consolas": ["dejavusansmono"], "lucidaconsole": ["dejavusansmono"],
+}
+
+
+def _family(name: str) -> tuple[str, bool, bool]:
+    """'ABCDEF+Arial-BoldItalicMT' -> ('arial', True, True)."""
+    n = re.sub(r"[^a-z0-9]", "", name.split("+", 1)[-1].lower())
+    bold = bool(re.search(r"semibold|demibold|extrabold|bold|black|heavy|demi|bd", n))
+    italic = bool(re.search(r"italic|oblique|ita", n))
+    return _STYLE.sub("", n), bold, italic
+
+
+TWINS = {_family(k)[0]: [_family(v)[0] for v in vs] for k, vs in _TWINS.items()}  # both sides spelled as _family() does
+
+
+@lru_cache(maxsize=1)
+def _installed() -> dict:
+    """(family, bold, italic) -> font file, for the fonts on this machine."""
+    out = {}
+    for d in FONT_DIRS:
+        for path in sorted(Path(d).rglob("*")) if Path(d).is_dir() else []:
+            if path.suffix.lower() in (".ttf", ".otf"):
+                out.setdefault(_family(path.stem), str(path))
+    return out
+
+
+@lru_cache(maxsize=64)
+def _font_file(path: str) -> pymupdf.Font:
+    return pymupdf.Font(fontfile=path)
+
+
+def font_for(name: str, flags: int = 0) -> tuple[pymupdf.Font, str]:
+    """The font to write new text in for a span set in `name`, and what it is called, e.g. 'Liberation Sans Bold'."""
+    family, bold, italic = _family(name)
+    bold, italic = bold or bool(flags & 16), italic or bool(flags & 2)
+    kind = "liberationmono" if flags & 8 else "liberationserif" if flags & 4 else "liberationsans"
+    fonts = _installed()
+    for fam in [family, *TWINS.get(family, []), kind]:
+        for style in ((bold, italic), (bold, False), (False, False)):  # same family in another style beats another family
+            if (fam, *style) in fonts:
+                f = _font_file(fonts[(fam, *style)])
+                return f, f.name
+    base = {(False, False): "helv", (True, False): "hebo", (False, True): "heit", (True, True): "hebi"}[(bold, italic)]
+    if flags & 4:
+        base = {"helv": "tiro", "hebo": "tibo", "heit": "tiit", "hebi": "tibi"}[base]
+    elif flags & 8:
+        base = {"helv": "cour", "hebo": "cobo", "heit": "coit", "hebi": "cobi"}[base]
+    f = pymupdf.Font(base)
+    return f, f.name
+
+
+def embedded_font(page: pymupdf.Page, name: str) -> pymupdf.Font | None:
+    """The page's own copy of a font, if it is embedded and loads."""
+    for xref, _, _, basefont, *_ in page.get_fonts(full=True):
+        if basefont.split("+", 1)[-1] == name.split("+", 1)[-1]:
+            try:
+                buf = page.parent.extract_font(xref)[3]
+                return pymupdf.Font(fontbuffer=buf) if buf else None
+            except Exception:  # a font MuPDF can't load: use the installed match instead
+                return None
+    return None
+
+
+def write_like(layer: pymupdf.Page, page: pymupdf.Page, span: dict, text: str, size: float | None = None) -> None:
+    """Write `text` on a scratch layer where `span` (from page.get_text('dict')) sits, as close to its look as this
+    server can: its font, size, colour and baseline. Each character uses the first font that has it."""
+    if not text:
+        return
+    size = size or span["size"]
+    own = embedded_font(page, span["font"])
+    fonts = [f for f in (own, font_for(span["font"], span["flags"])[0], FONT) if f is not None]
+    origin = pymupdf.Point(span["origin"]) * page.rotation_matrix  # the layer is the page as displayed
+    writer = pymupdf.TextWriter(layer.rect, color=pymupdf.sRGB_to_pdf(span["color"]))
+    pos, run, current = origin, "", None
+    for ch in text + " ":  # runs of characters that share a font; the extra space ends the last run
+        if ch.isspace():
+            # a gap, not a space glyph: some fonts share that glyph with the no-break space, which then comes back
+            # out of the PDF and breaks search and copy; readers turn the gap into a space themselves
+            if run:
+                pos = writer.append(pos, run, font=current, fontsize=size)[1]
+                run = ""
+            pos = pos + ((current or fonts[0]).text_length(" ", fontsize=size), 0)
+            continue
+        f = next((f for f in fonts if f.has_glyph(ord(ch))), FONT)
+        if run and f is not current:
+            pos = writer.append(pos, run, font=current, fontsize=size)[1]
+            run = ""
+        run, current = run + ch, f
+    writer.write_text(layer, morph=(origin, pymupdf.Matrix(-page.rotation)))
+
+
+def page_spans(page: pymupdf.Page) -> list[dict]:
+    """The text of a page in page.get_text('dict') span form (unrotated coordinates), level lines only.
+    Invisible text - the OCR layer over a scan - comes a word at a time, sized wrongly and with no real font: each line
+    of it becomes one span, sized by its box, marked "scanned", in a plain sans-serif."""
+    out = []
+    for b in page.get_text("dict")["blocks"]:
+        for line in b.get("lines", []):
+            if abs(line["dir"][1]) > 0.05:  # scans lean a little; text set at an angle is left alone
+                continue
+            spans = [s for s in line["spans"] if s["text"].strip()]
+            hidden = [s for s in spans if s.get("alpha") == 0]
+            if hidden:
+                box = pymupdf.Rect(hidden[0]["bbox"])
+                for s in hidden[1:]:
+                    box |= s["bbox"]
+                out.append({**hidden[0], "text": "".join(s["text"] for s in hidden).strip(), "bbox": tuple(box),
+                            "size": box.height, "font": "Helvetica", "flags": 0, "scanned": True})
+            out += [s for s in spans if s.get("alpha") != 0]
+    return out
+
+
+def _grown(span: dict) -> pymupdf.Rect:
+    r = pymupdf.Rect(span["bbox"])
+    return r + (-1.5, -0.15 * r.height, 1.5, 0.15 * r.height)  # anti-aliased edges and accents of a scanned line
+
+
+def scan_look(page: pymupdf.Page, span: dict) -> dict:
+    """A scanned line's span with what its picture shows: the paper colour (0-1 RGB, as "paper"), the ink colour and
+    the letter size. OCR programs guess sizes differently, but the baseline they give is right, and capitals and tall
+    letters reach about 0.7 of the size above it."""
+    clip = _grown(span)
+    turn = page.rotation
+    page.set_rotation(0)  # read the picture the way the text's coordinates run
+    try:
+        clip &= page.rect
+        pix = page.get_pixmap(clip=clip, dpi=144, colorspace=pymupdf.csRGB, alpha=False)
+    finally:
+        page.set_rotation(turn)
+    px = list(zip(*[iter(pix.samples)] * 3))
+    paper = Counter(tuple(v // 16 * 16 + 8 for v in c) for c in px).most_common(1)[0][0]  # the commonest colour, give or take noise
+    gap = [sum((a - b) ** 2 for a, b in zip(c, paper)) for c in px]
+    far = sorted(range(len(px)), key=gap.__getitem__)[-max(1, len(px) // 20):]  # the 5% of pixels least like the paper
+    ink = [sum(px[i][k] for i in far) // len(far) for k in range(3)]
+    inky = [sum(gap[y * pix.width + x] > gap[far[-1]] / 4 for x in range(pix.width)) for y in range(pix.height)]
+    top = next((y for y, n in enumerate(inky) if n >= max(2, pix.width // 100)), None)  # a speck is not a letter
+    height = pymupdf.Rect(span["bbox"]).height
+    size = height if top is None else (span["origin"][1] - (clip.y0 + top * clip.height / pix.height)) / 0.7
+    return {**span, "paper": tuple(v / 255 for v in paper), "color": (ink[0] << 16) | (ink[1] << 8) | ink[2],
+            "size": min(max(size, 0.6 * height), 1.6 * height)}
+
+
+def cover_scan(layer: pymupdf.Page, page: pymupdf.Page, span: dict) -> dict:
+    """Paint over a scanned line in its paper colour, so new text can be written there; returns the span with the
+    scan's ink colour and letter size, for the new text."""
+    span = scan_look(page, span)
+    layer.draw_rect((_grown(span) * page.rotation_matrix).normalize(), color=None, fill=span["paper"])
+    return span
 
 
 def chunks(doc: PDF, bounds: list[int]) -> list:
