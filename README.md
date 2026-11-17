@@ -105,9 +105,10 @@ Every commit on `main` that passes CI is published to the private registry at `r
 Pull requests never publish.
 
 ```bash
-docker login registry.saeidnia.com
 docker pull registry.saeidnia.com/pdfeditor:latest
 ```
+
+The registry has no login: anyone who knows the address can pull, push and delete.
 
 The registry sits behind a Cloudflare Tunnel, which refuses any single upload over 100 MB, so CI uploads the
 image in 50 MB chunks with [regctl](https://github.com/regclient/regclient) instead of `docker push`. Pulling is

@@ -54,14 +54,13 @@ jobs:
         if: failure()
         run: docker logs pdfeditor || true
 
-      # Publishes the exact image that passed the steps above. Never on pull requests, so their code cannot see the password.
+      # Publishes the exact image that passed the steps above. Never on pull requests. The registry has no login.
       # A commit on main is pushed as "latest" and as its short hash; a git tag like v1.2.0 under its own name.
       # The registry sits behind Cloudflare, which refuses any single upload over 100 MB, and "docker push" sends
       # each layer in one piece. So the image goes to a throwaway local registry and regctl copies it up in chunks.
       - name: Push the tested image to registry.saeidnia.com
         if: github.event_name == 'push'
         env:
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
           REGCTL_URL: https://github.com/regclient/regclient/releases/download/v0.11.7/regctl-linux-amd64
           REGCTL_SHA256: 3737fbbdd791e04e7a831640b681f3397a376498e80e2ad9b1b2d27296f239bc
         run: |
@@ -73,7 +72,6 @@ jobs:
           docker tag pdfeditor:ci localhost:5000/pdfeditor:ci
           docker push -q localhost:5000/pdfeditor:ci
           ./regctl registry set localhost:5000 --tls disabled
-          printf '%s' "$REGISTRY_PASSWORD" | ./regctl registry login registry.saeidnia.com -u ci --pass-stdin
           ./regctl registry set registry.saeidnia.com --blob-chunk 50000000 --blob-max 50000000  # bytes
           if [ "$GITHUB_REF_TYPE" = tag ]; then tags="$GITHUB_REF_NAME"; else tags="latest ${GITHUB_SHA::7}"; fi
           for t in $tags; do
