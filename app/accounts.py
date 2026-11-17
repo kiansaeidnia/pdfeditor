@@ -97,6 +97,8 @@ def config(request: Request):
         out["preset"] = {"database": "database" in p, "storage": p.get("storage", {}).get("bucket")}
     elif s["login"] == "accounts":
         out["signup"] = s["signup"]
+        if why := settings.missing(s):
+            raise HTTPException(503, why)
         try:
             user = signed_in(request, s)
         except dbm.Down as e:

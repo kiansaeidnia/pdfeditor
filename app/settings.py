@@ -25,6 +25,8 @@ INVITE_DAYS = 7
 DEFAULT_QUOTA_MB = 1024
 _cache: tuple[Path, float, dict] | None = None  # (file, mtime, settings) last read
 _dbs: dict = {}  # one DB object (and one schema check) per database per process
+FROM_ENV = "from the environment"  # kept in the file in place of a value the environment supplies
+NAMES = {"database": "DATABASE_URL", "storage": "S3_BUCKET and the other S3_ settings"}
 
 
 def _file() -> Path:
@@ -76,13 +78,25 @@ def _upgrade(old: dict) -> dict:
 
 def save(s: dict) -> None:
     """Write atomically and readable by the app only: the file holds the mail and storage passwords."""
-    s = {k: v for k, v in s.items() if k not in preset() or s.get(k) != preset()[k]}  # never copy secrets from the environment
+    # never copy secrets from the environment; note instead that they come from there, so missing() can tell
+    p = preset()
+    s = {k: FROM_ENV if k in p and v == p[k] else v for k, v in s.items()}
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = _file().with_suffix(f".{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=2)
     os.replace(tmp, _file())
+
+
+def missing(s: dict) -> str:
+    """Why this server can't run, if it was set up with a database or storage from the environment that is gone now.
+    Without this it would quietly start over on an empty database."""
+    gone = [NAMES[k] for k in NAMES if s.get(k) == FROM_ENV]
+    if not gone:
+        return ""
+    return (f"This server was set up with {' and '.join(gone)} from its environment (.env), and that is not set now. "
+            "Put it back and restart the app; your accounts and files are still where they were.")
 
 
 def database(s: dict) -> DB:

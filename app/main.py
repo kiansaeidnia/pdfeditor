@@ -34,6 +34,8 @@ app = FastAPI(title=os.environ.get("APP_NAME", "pdfeditor"), version="1.0.0", do
 
 if settings.current() is None:
     settings.announce_setup()
+elif why := settings.missing(settings.current()):
+    log.error(why)
 
 
 @app.middleware("http")
@@ -47,6 +49,8 @@ async def guard(request: Request, call_next):
         s = settings.current()
         if s is None:
             return JSONResponse({"detail": "Finish setting up pdfeditor first: open it in a browser."}, 503)
+        if why := settings.missing(s):
+            return JSONResponse({"detail": why}, 503)
         # the UI and its static files load without signing in, so the sign-in page can show; they hold no data
         if s["login"] == "accounts":
             try:

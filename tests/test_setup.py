@@ -348,8 +348,18 @@ def test_environment_presets(client, fresh, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:secret@db/x")
     monkeypatch.setenv("S3_BUCKET", "files")
     assert client.get("/api/config").json()["preset"] == {"database": True, "storage": "files"}  # no password shown
+
+    # saved settings say where these come from, and never hold the values
+    settings.save({**settings.preset(), "login": "accounts", "signup": "invite", "quota_mb": 1, "secret": "s", "app_url": "",
+                   "smtp": {"host": "", "port": 587, "user": "", "password": "", "sender": ""}})
+    stored = (settings.DATA_DIR / "settings.json").read_text()
+    assert "secret@db" not in stored and json.loads(stored)["database"] == settings.FROM_ENV
+
+    # started later without them, the server says so instead of starting over on an empty database
     monkeypatch.delenv("DATABASE_URL")
     monkeypatch.delenv("S3_BUCKET")
+    for r in (client.get("/api/tools"), client.get("/api/config")):
+        assert r.status_code == 503 and "DATABASE_URL" in r.json()["detail"] and "S3_BUCKET" in r.json()["detail"]
 
 
 def test_tokens():
