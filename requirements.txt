@@ -8,3 +8,5 @@ pyhanko==0.38.1
 markdown==3.11.3
 weasyprint==70.0
 ocrmypdf==17.14.1
+psycopg[binary]==3.3.9
+boto3==1.44.4

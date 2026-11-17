@@ -47,8 +47,8 @@ const button = (text, onclick, props = {}) => h("button", {type: "button", oncli
 const iconButton = (text, name, k, onclick, disabled) =>
   button(text, onclick, {class: "icon", title: name, "aria-label": name, "data-k": k, disabled});
 
-async function api(path, body) {
-  const res = await fetch(path, body && {method: "POST", body}).catch(() => { throw new Error("Can't reach the server."); });
+async function api(path, body, method = body ? "POST" : "GET") {
+  const res = await fetch(path, {method, body}).catch(() => { throw new Error("Can't reach the server."); });
   if (res.ok) return res;
   if (res.status === 401 && config.user && path !== "/api/login") {  // the session ran out: back to the sign-in page
     config.user = null;
@@ -223,6 +223,13 @@ function showResult(r) {
   } else if (type.startsWith("text/")) {
     blob.slice(0, 100_000).text().then(t => { pre.textContent = t; });
     result.append(pre);
+  }
+  if (config.user) {
+    const status = statusEl(), keep = button("Save to My files", () => busy(keep, status, async () => {
+      await api("/api/files", formData({files: new File([blob], name, {type})}));
+      return "Saved to My files.";
+    }));
+    result.append(h("div", {class: "row"}, keep), status);
   }
   if (config.email) {
     const to = h("input", {type: "email", autocomplete: "email"}), status = statusEl(), send = h("button", {}, "Send");
@@ -640,76 +647,136 @@ function pipeline() {
     h("div", {class: "row"}, button("Load", load), run), status);
 }
 
-// --- first-run setup and sign-in ----------------------------------------------------------------
+// --- first-run setup ----------------------------------------------------------------------------
 
-// The setup wizard: setup code, then who may use the app, then (with a sign-in) an optional mail server.
+// A group of large radio choices. Changing one redraws its page (draw) and keeps the focus on the choice, so arrow
+// keys go on working.
+function choices(name, label, options, get, set, draw) {
+  return h("div", {class: "stack", role: "radiogroup", "aria-label": label}, options.map(([value, title, hint]) =>
+    h("label", {class: "choice"},
+      h("input", {type: "radio", name, value, checked: get() === value, onchange: e => {
+        set(value);
+        draw(false);
+        document.querySelector(`input[name="${name}"][value="${value}"]`)?.focus();
+        e.stopPropagation();
+      }}),
+      h("span", {}, h("strong", {}, title), h("small", {}, hint)))));
+}
+
+// The setup wizard. With accounts: code, who can use it, the admin account, the sign-up rule, storage, e-mail.
+// Without: code, who can use it.
 function setupView() {
-  const st = {step: 0, login: "password", mail: false};
+  const st = {step: 0, login: "accounts", signup: "invite", db: "sqlite", files: "local", mail: false};
   const text = props => h("input", {type: "text", autocomplete: "off", spellcheck: false, autocapitalize: "off", ...props});
+  const secret = () => h("input", {type: "password", autocomplete: "new-password"});
   const code = text({});
-  const email = h("input", {type: "email", autocomplete: "username", pattern: EMAIL});
-  const pass = h("input", {type: "password", autocomplete: "new-password"});
-  const again = h("input", {type: "password", autocomplete: "new-password"});
+  const email = h("input", {type: "email", autocomplete: "username", pattern: EMAIL}), pass = secret(), again = secret();
+  const dbUrl = text({placeholder: "postgresql://user:password@host:5432/pdfeditor"});
+  const s3 = {endpoint: text({placeholder: "https://s3.example.com"}), region: text({placeholder: "us-east-1"}), bucket: text({}),
+    access: text({}), key: secret()};
   const host = text({placeholder: "mail.example.com"});
   const port = h("select", {}, h("option", {value: "587"}, "587 (STARTTLS, the usual one)"), h("option", {value: "465"}, "465 (TLS)"));
-  const muser = text({});
-  const mpass = h("input", {type: "password", autocomplete: "off"});
+  const muser = text({}), mpass = secret();
   const from = h("input", {type: "email", autocomplete: "off", placeholder: "pdf@example.com", pattern: EMAIL});
   const status = statusEl(), next = h("button", {class: "primary"}), progress = h("ol", {class: "progress"}), body = h("div", {class: "stack"});
   const back = button("Back", () => { st.step--; draw(); });
-  const choice = (value, title, hint) => h("label", {class: "choice"},
-    h("input", {type: "radio", name: "login", value, checked: st.login === value, onchange: () => {
-      st.login = value;
-      draw(false);  // keep the focus on the choice, so arrow keys go on working
-      body.querySelector(`input[value=${value}]`).focus();
-    }}),
-    h("span", {}, h("strong", {}, title), h("small", {}, hint)));
-  const smtp = () => st.mail && st.login === "password" ? {smtp_host: host.value.trim(), smtp_port: port.value, smtp_user: muser.value.trim(), smtp_password: mpass.value, smtp_from: from.value.trim()} : {};
+  const accounts = () => st.login === "accounts";
+  const preset = config.preset ?? {};
+
+  const smtp = () => st.mail && accounts() ? {smtp_host: host.value.trim(), smtp_port: port.value, smtp_user: muser.value.trim(),
+    smtp_password: mpass.value, smtp_from: from.value.trim()} : {};
+  const where = () => ({
+    ...(st.db === "postgres" && !preset.database ? {database: dbUrl.value.trim()} : {}),
+    ...(st.files === "s3" && !preset.storage ? {storage: "s3", s3_endpoint: s3.endpoint.value.trim(), s3_region: s3.region.value.trim(),
+      s3_bucket: s3.bucket.value.trim(), s3_access_key: s3.access.value.trim(), s3_secret_key: s3.key.value} : {}),
+  });
+  const tryIt = (label, path, fields, done) => {
+    const b = button(label, () => busy(b, status, async () => {
+      check(st.step);
+      await api(path, formData({code: code.value, ...fields()}));
+      return done;
+    }));
+    return b;
+  };
   const useMail = h("input", {type: "checkbox", onchange: () => { st.mail = useMail.checked; draw(false); useMail.focus(); }});
-  const test = button("Send a test e-mail", () => busy(test, status, async () => {
-    check(2);
-    await api("/api/setup/test-email", formData({code: code.value, to: email.value.trim(), ...smtp()}));
-    return `Test e-mail sent to ${email.value.trim()}. If it doesn't arrive, check the spam folder and the settings.`;
-  }));
   const mailFields = h("div", {class: "fields"}, field("Mail server", host, "", true), field("Port", port),
     field("User name", muser, "Often the full e-mail address."), field("Password", mpass),
-    field("Send from", from, "Leave empty to use the user name, if it is an e-mail address."), h("div", {class: "row"}, test));
-  const names = () => st.login === "password" ? ["Setup code", "Sign-in", "E-mail"] : ["Setup code", "Sign-in"];
-  const pages = [
-    () => [h("h2", {tabIndex: -1}, "Enter your setup code"),
+    field("Send from", from, "Leave empty to use the user name, if it is an e-mail address."),
+    h("div", {class: "row"}, tryIt("Send a test e-mail", "/api/setup/test-email", () => ({to: email.value.trim(), ...smtp()}),
+      "Test e-mail sent. If it doesn't arrive, check the spam folder and the settings.")));
+  const dbFields = h("div", {class: "fields"}, field("Postgres address", dbUrl, "The database must exist; pdfeditor creates its tables.", true),
+    h("div", {class: "row"}, tryIt("Test the connection", "/api/setup/test-database", where, "Connected: the database is ready.")));
+  const s3Fields = h("div", {class: "fields"}, field("Endpoint", s3.endpoint, "Leave empty for Amazon S3. Cloudflare R2, Backblaze B2 and MinIO give you one."),
+    field("Region", s3.region, "Leave empty if your provider doesn't use one."), field("Bucket", s3.bucket, "It must exist already.", true),
+    field("Access key", s3.access), field("Secret key", s3.key),
+    h("div", {class: "row"}, tryIt("Test the bucket", "/api/setup/test-storage", where, "The bucket works: a test file was written, read back and deleted.")));
+
+  const steps = [
+    {name: "Setup code", page: () => [h("h2", {tabIndex: -1}, "Enter your setup code"),
       h("p", {}, "This proves you run this server. The code is in the container's log: on the machine running pdfeditor, run"),
       h("pre", {}, "docker compose logs pdfeditor"), field("Setup code", code, "", true)],
-    () => [h("h2", {tabIndex: -1}, "Who can use pdfeditor?"),
-      h("div", {class: "stack", role: "radiogroup", "aria-label": "Who can use pdfeditor"},
-        choice("password", "Only people with the password", "Sign in with an e-mail address and a password. Needed to send e-mail."),
-        choice("none", "Anyone who can open this page", "No sign-in. Fine when only you can reach this computer.")),
-      st.login === "password" && h("div", {class: "fields"}, field("Your e-mail address", email, "You sign in with it.", true),
-        field("Password", pass, "At least 8 characters.", true), field("Password again", again, "", true))],
-    () => [h("h2", {tabIndex: -1}, "Sending e-mail (optional)"),
-      h("p", {}, "With a mail server, results can be e-mailed from the result panel, and a forgotten password can be reset by e-mail."),
-      field("Send e-mail through my mail server", useMail), st.mail ? mailFields : h("p", {class: "empty"}, "You can skip this: everything else works without it.")],
-  ];
-
-  // throws the first problem on step n, so the user is told before moving on
-  function check(n) {
-    if (n === 0 && !code.value.trim()) throw new Error("Enter the setup code.");
-    if (n === 1 && st.login === "password") {
+    check: () => { if (!code.value.trim()) throw new Error("Enter the setup code."); },
+    leave: () => api("/api/setup/code", formData({code: code.value}))},
+    {name: "Access", page: () => [h("h2", {tabIndex: -1}, "Who can use pdfeditor?"),
+      choices("login", "Who can use pdfeditor", [
+        ["accounts", "People with an account", "Everyone signs in with an e-mail address and a password, and gets their own file library. You will be the admin."],
+        ["none", "Anyone who can open this page", "No accounts and no file libraries. Fine when only you can reach this computer."],
+      ], () => st.login, v => { st.login = v; }, draw)]},
+    {name: "Admin", when: accounts, page: () => [h("h2", {tabIndex: -1}, "Your admin account"),
+      h("p", {}, "You sign in with this, and you can manage everyone else's accounts."),
+      h("div", {class: "fields"}, field("Your e-mail address", email, "", true), field("Password", pass, "At least 8 characters.", true),
+        field("Password again", again, "", true))],
+    check: () => {
       if (!email.value.trim() || !email.checkValidity()) throw new Error("Enter a valid e-mail address.");
       if (pass.value.length < 8) throw new Error("The password needs at least 8 characters.");
       if (pass.value !== again.value) throw new Error("The two passwords are not the same.");
-    }
-    if (n === 2 && st.mail) {
+    }},
+    {name: "Sign-up", when: accounts, page: () => [h("h2", {tabIndex: -1}, "How do other people get an account?"),
+      choices("signup", "How other people get an account", [
+        ["invite", "Only people I invite", "You make invite links on the admin page."],
+        ["approval", "Anyone can ask, and an admin approves", "New accounts wait until an admin approves them."],
+        ["open", "Anyone can sign up", "New accounts work straight away. Only for a server you are happy to share."],
+      ], () => st.signup, v => { st.signup = v; }, draw),
+      h("p", {class: "empty"}, "You can change this later on the admin page.")]},
+    {name: "Storage", when: accounts, page: () => [h("h2", {tabIndex: -1}, "Where accounts and files are kept"),
+      h("h3", {}, "Accounts"),
+      preset.database ? h("p", {}, "In the Postgres database set by the server (DATABASE_URL).")
+        : [choices("db", "Where accounts are kept", [
+          ["sqlite", "A database file on this server", "SQLite, kept in the data volume. Nothing to set up."],
+          ["postgres", "A Postgres database", "For a database you already run or back up."],
+        ], () => st.db, v => { st.db = v; }, draw), st.db === "postgres" && dbFields],
+      h("h3", {}, "Files"),
+      preset.storage ? h("p", {}, `In the S3 bucket “${preset.storage}” set by the server.`)
+        : [choices("files", "Where files are kept", [
+          ["local", "This server's disk", "Kept in the data volume."],
+          ["s3", "S3-compatible storage", "Amazon S3, Cloudflare R2, Backblaze B2, MinIO and others."],
+        ], () => st.files, v => { st.files = v; }, draw), st.files === "s3" && s3Fields]],
+    check: () => {
+      if (st.db === "postgres" && !preset.database && !/^postgres(ql)?:\/\//.test(dbUrl.value.trim())) throw new Error("A Postgres address starts with postgresql://");
+      if (st.files === "s3" && !preset.storage && !s3.bucket.value.trim()) throw new Error("Enter the bucket's name.");
+    },
+    leave: async () => {  // a wrong address shows up here, on the step that has it, not at the very end
+      await api("/api/setup/test-database", formData({code: code.value, ...where()}));
+      await api("/api/setup/test-storage", formData({code: code.value, ...where()}));
+    }},
+    {name: "E-mail", when: accounts, page: () => [h("h2", {tabIndex: -1}, "Sending e-mail (optional)"),
+      h("p", {}, "With a mail server, results can be e-mailed, forgotten passwords reset, invites sent, and admins told about new sign-ups."),
+      field("Send e-mail through my mail server", useMail), st.mail ? mailFields : h("p", {class: "empty"}, "You can skip this: everything else works without it.")],
+    check: () => {
+      if (!st.mail) return;
       if (!host.value.trim()) throw new Error("Enter the mail server, e.g. mail.example.com.");
       if (!(from.value.trim() || muser.value.includes("@"))) throw new Error("Enter the address mail is sent from.");
       if (!from.checkValidity()) throw new Error("“Send from” is not a valid e-mail address.");
-    }
-  }
+    }},
+  ];
+  const shown = () => steps.filter(s => !s.when || s.when());
+  const check = n => shown()[n].check?.();
 
   function draw(focus = true) {
-    const all = names(), last = st.step === all.length - 1;
+    const all = shown(), last = st.step === all.length - 1;
     useMail.checked = st.mail;
-    progress.replaceChildren(...all.map((n, i) => h("li", {class: i < st.step ? "done" : "", "aria-current": i === st.step ? "step" : null}, n)));
-    body.replaceChildren(...pages[st.step]().flat().filter(Boolean));
+    progress.replaceChildren(...all.map((s, i) => h("li", {class: i < st.step ? "done" : "", "aria-current": i === st.step ? "step" : null}, s.name)));
+    body.replaceChildren(...[all[st.step].page()].flat(3).filter(Boolean));
     next.textContent = last ? "Finish setup" : "Next";
     back.hidden = st.step === 0;
     tell(status, "");
@@ -719,14 +786,15 @@ function setupView() {
   const form = h("form", {class: "panel narrow", onsubmit: e => {
     e.preventDefault();
     busy(next, status, async () => {
-      check(st.step);
-      if (st.step === 0) await api("/api/setup/code", formData({code: code.value}));
-      if (st.step < names().length - 1) {
+      const step = shown()[st.step];
+      step.check?.();
+      await step.leave?.();
+      if (st.step < shown().length - 1) {
         st.step++;
         return draw();
       }
-      const login = st.login === "password" ? {email: email.value.trim(), password: pass.value} : {};
-      await api("/api/setup", formData({code: code.value, login: st.login, app_url: location.origin, ...login, ...smtp()}));
+      const admin = accounts() ? {email: email.value.trim(), password: pass.value, signup: st.signup, ...where()} : {};
+      await api("/api/setup", formData({code: code.value, login: st.login, app_url: location.origin, ...admin, ...smtp()}));
       location.hash = "#/";
       await refresh();
       say("Setup is finished.");
@@ -736,8 +804,12 @@ function setupView() {
   return form;
 }
 
+// --- signing in and up --------------------------------------------------------------------------
+
+const canSignUp = () => config.signup === "open" || config.signup === "approval";
+
 function loginView() {
-  const email = h("input", {type: config.user_label === "E-mail" ? "email" : "text", autocomplete: "username", required: true});
+  const email = h("input", {type: "email", autocomplete: "username", required: true});
   const pass = h("input", {type: "password", autocomplete: "current-password", required: true});
   const status = statusEl(), go = h("button", {class: "primary"}, "Sign in");
   return h("form", {class: "panel narrow", onsubmit: e => {
@@ -747,9 +819,41 @@ function loginView() {
       config.expired = false;
       await refresh();
     });
-  }}, h("h1", {}, `Sign in to ${config.name}`), field(config.user_label, email), field("Password", pass),
-    h("div", {class: "row"}, go), config.reset && h("p", {}, h("a", {href: "#/forgot"}, "Forgot your password?")),
+  }}, h("h1", {}, `Sign in to ${config.name}`), field("E-mail", email), field("Password", pass),
+    h("div", {class: "row"}, go),
+    h("p", {class: "links"}, config.email && h("a", {href: "#/forgot"}, "Forgot your password?"),
+      canSignUp() && h("a", {href: "#/signup"}, "Create an account")),
     config.expired ? h("p", {class: "status", role: "status"}, "You were signed out. Sign in again to carry on: your chosen files are still here.") : status);
+}
+
+function signupView(invite = "") {
+  if (!invite && !canSignUp()) {
+    return h("div", {class: "panel narrow"}, h("h1", {}, "Accounts are by invitation"),
+      h("p", {}, "Ask an admin of this server for an invite link."), h("p", {}, h("a", {href: "#/"}, "← Sign in")));
+  }
+  const email = h("input", {type: "email", autocomplete: "username", required: true, pattern: EMAIL});
+  const pass = h("input", {type: "password", autocomplete: "new-password", required: true, minLength: 8});
+  const again = h("input", {type: "password", autocomplete: "new-password", required: true});
+  const status = statusEl(), go = h("button", {class: "primary"}, "Create account");
+  const form = h("form", {class: "panel narrow", onsubmit: e => {
+    e.preventDefault();
+    busy(go, status, async () => {
+      if (pass.value !== again.value) throw new Error("The two passwords are not the same.");
+      const r = await (await api("/api/signup", formData({email: email.value.trim(), password: pass.value, invite}))).json();
+      if (r.pending) {
+        return form.replaceChildren(h("h1", {}, "Thanks, you're nearly in"),
+          h("p", {}, `An admin needs to approve your account. ${config.email ? "You'll get an e-mail when it's ready." : "Try signing in again later."}`),
+          h("p", {}, h("a", {href: "#/"}, "← Sign in")));
+      }
+      location.hash = "#/";
+      await refresh();
+      say("Your account is ready.");
+    });
+  }}, h("h1", {}, invite ? `You're invited to ${config.name}` : "Create an account"),
+    config.signup === "approval" && !invite && h("p", {}, "An admin approves new accounts before they can be used."),
+    field("Your e-mail address", email), field("Password", pass, "At least 8 characters."), field("Password again", again),
+    h("div", {class: "row"}, go), h("p", {}, "Have an account? ", h("a", {href: "#/"}, "Sign in")), status);
+  return form;
 }
 
 function forgotView() {
@@ -759,7 +863,7 @@ function forgotView() {
     e.preventDefault();
     busy(go, status, async () => {
       await api("/api/forgot", formData({email: email.value}));
-      return "If that address can sign in here, a link to set a new password is on its way. It works for 30 minutes.";
+      return "If that address has an account here, a link to set a new password is on its way. It works for 30 minutes.";
     });
   }}, h("p", {class: "crumb"}, h("a", {href: "#/"}, "← Sign in")), h("h1", {}, "Forgot your password?"),
     h("p", {}, "We'll e-mail you a link to set a new one."), field("Your e-mail address", email), h("div", {class: "row"}, go), status);
@@ -782,16 +886,208 @@ function resetView(token) {
     h("div", {class: "row"}, go), status);
 }
 
+function accountView() {
+  const current = h("input", {type: "password", autocomplete: "current-password", required: true});
+  const pass = h("input", {type: "password", autocomplete: "new-password", required: true, minLength: 8});
+  const again = h("input", {type: "password", autocomplete: "new-password", required: true});
+  const status = statusEl(), go = h("button", {class: "primary"}, "Change password");
+  return h("div", {class: "narrow"}, h("h1", {}, "Your account"),
+    h("p", {}, `Signed in as ${config.user.email}${config.user.role === "admin" ? ", an admin" : ""}.`),
+    h("form", {class: "panel", onsubmit: e => {
+      e.preventDefault();
+      busy(go, status, async () => {
+        if (pass.value !== again.value) throw new Error("The two passwords are not the same.");
+        await api("/api/account/password", formData({current: current.value, password: pass.value}));
+        current.value = pass.value = again.value = "";
+        return "Your password is changed. Other browsers signed in as you have been signed out.";
+      });
+    }}, h("h2", {}, "Change your password"), field("Current password", current), field("New password", pass, "At least 8 characters."),
+      field("New password again", again), h("div", {class: "row"}, go), status));
+}
+
+// --- My files -----------------------------------------------------------------------------------
+
+// A delete button that asks for a second press before it acts
+function dangerButton(text, name, k, action) {
+  let armed = null;
+  const set = (t, label) => { b.textContent = t; b.setAttribute("aria-label", label); };
+  const b = button(text, () => {
+    if (!armed) {
+      set("Press again to delete", `Press again to confirm: ${name}`);
+      armed = setTimeout(() => { armed = null; set(text, name); }, 4000);
+      return;
+    }
+    clearTimeout(armed);
+    armed = null;
+    set(text, name);
+    action();
+  }, {class: "danger", "aria-label": name, "data-k": k});
+  return b;
+}
+
+const when = t => new Date(t * 1000).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"});
+
+function filesView() {
+  const status = statusEl(), list = h("ul", {class: "library", "aria-label": "Your files"});
+  const meter = h("progress", {max: 1, value: 0}), usage = h("span", {});
+  let renaming = null;
+  const input = h("input", {type: "file", class: "sr", id: `f${++uid}`, multiple: true, onchange: () => { upload(input.files); input.value = ""; }});
+  const drop = h("div", {class: "drop",
+    ondragover: e => { e.preventDefault(); drop.classList.add("over"); },
+    ondragleave: () => drop.classList.remove("over"),
+    ondrop: e => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files); }},
+    h("label", {for: input.id}, "Add files or drop them here"), input, h("small", {}, `Up to ${config.max_upload_mb} MB at a time.`));
+
+  const act = async (job, done) => {
+    try {
+      await job();
+      await load();
+      tell(status, done);
+    } catch (e) {
+      await load().catch(() => {});  // show what did happen, e.g. the files saved before one failed
+      tell(status, e.message, true);
+    }
+  };
+  const upload = files => files.length && act(() => api("/api/files", formData({files: [...files]})), `${files.length === 1 ? "File" : `${files.length} files`} added.`);
+
+  async function open(f) {
+    tell(status, `Opening ${f.name}…`);
+    try {
+      const blob = await (await api(`/api/files/${f.id}`)).blob();
+      carry = [new File([blob], f.name, {type: f.type})];
+      cat = search.value = "";
+      location.hash = "#/";
+    } catch (e) { tell(status, e.message, true); }
+  }
+
+  function row(f) {
+    if (renaming === f.id) {
+      const name = h("input", {type: "text", value: f.name, "aria-label": `New name for ${f.name}`, required: true});
+      setTimeout(() => { name.focus(); name.select(); });
+      return h("li", {}, h("form", {class: "row", onsubmit: e => {
+        e.preventDefault();
+        renaming = null;
+        act(() => api(`/api/files/${f.id}/rename`, formData({name: name.value})), "Renamed.");
+      }}, name, h("button", {class: "primary"}, "Save"), button("Cancel", () => { renaming = null; load(); })));
+    }
+    return h("li", {},
+      h("div", {}, h("strong", {}, f.name), h("small", {}, `${size(f.size)} · ${when(f.created)}`)),
+      h("div", {class: "row"},
+        /^(application\/pdf|image\/)/.test(f.type) && button("Open in a tool", () => open(f), {"data-k": `${f.id}open`}),
+        h("a", {class: "button quiet", href: `/api/files/${f.id}`, download: f.name}, "Download"),
+        button("Rename", () => { renaming = f.id; load(); }, {"data-k": `${f.id}rename`}),
+        dangerButton("Delete", `Delete ${f.name}`, `${f.id}del`, () => act(() => api(`/api/files/${f.id}`, null, "DELETE"), `${f.name} deleted.`))));
+  }
+
+  async function load() {
+    const d = await (await api("/api/files")).json();
+    const limit = d.quota_mb * 2 ** 20;
+    meter.hidden = !limit;
+    if (limit) meter.value = Math.min(1, d.used / limit);
+    const usedText = d.used ? size(d.used) : "Nothing";
+    usage.textContent = limit ? `${usedText} of ${d.quota_mb >= 1024 ? `${+(d.quota_mb / 1024).toFixed(1)} GB` : `${d.quota_mb} MB`} used` : `${usedText} used`;
+    keepFocus(list, () => list.replaceChildren(...(d.files.length ? d.files.map(row)
+      : [h("li", {class: "empty"}, "No files yet. Add some here, or keep a tool's result with “Save to My files”.")])));
+  }
+  load().catch(e => tell(status, e.message, true));
+  return h("div", {}, h("h1", {}, "My files"), h("p", {class: "row usage"}, meter, usage), drop, status, list);
+}
+
+// --- admin --------------------------------------------------------------------------------------
+
+function adminView() {
+  const status = statusEl(), people = h("div", {}), pending = h("div", {});
+  const ACTIONS = {approve: "Approve", disable: "Turn off", enable: "Turn on", make_admin: "Make admin", make_user: "Remove admin"};
+  const act = (u, action, done) => busyAll(async () => {
+    await api(`/api/admin/users/${u.id}`, formData({action}));
+    await load();
+    return done;
+  });
+  const busyAll = job => job().then(m => tell(status, m), e => tell(status, e.message, true));
+
+  function person(u) {
+    const self = u.email === config.user.email;
+    const buttons = self ? [h("small", {}, "You")] : [
+      u.status === "pending" && button(ACTIONS.approve, () => act(u, "approve", `${u.email} approved.`), {class: "primary", "data-k": `${u.id}a`}),
+      u.status === "active" && button(ACTIONS.disable, () => act(u, "disable", `${u.email} is turned off.`), {"data-k": `${u.id}d`}),
+      u.status === "disabled" && button(ACTIONS.enable, () => act(u, "enable", `${u.email} is turned on.`), {"data-k": `${u.id}e`}),
+      u.status !== "pending" && (u.role === "admin"
+        ? button(ACTIONS.make_user, () => act(u, "make_user", `${u.email} is no longer an admin.`), {"data-k": `${u.id}r`})
+        : button(ACTIONS.make_admin, () => act(u, "make_admin", `${u.email} is now an admin.`), {"data-k": `${u.id}r`})),
+      dangerButton(u.status === "pending" ? "Refuse" : "Delete", `Delete ${u.email} and their files`, `${u.id}x`,
+        () => act(u, "delete", `${u.email} deleted.`)),
+    ];
+    return h("tr", {},
+      h("th", {scope: "row"}, u.email), h("td", {}, u.role === "admin" ? "Admin" : "User"),
+      h("td", {}, {active: "Active", pending: "Waiting", disabled: "Turned off"}[u.status]),
+      h("td", {}, u.files ? `${u.files} (${size(u.bytes)})` : "None"), h("td", {}, h("div", {class: "row"}, buttons)));
+  }
+  const table = users => h("div", {class: "scroll"}, h("table", {},
+    h("thead", {}, h("tr", {}, ["Account", "Role", "Status", "Files", ""].map(t => h("th", {scope: "col"}, t)))),
+    h("tbody", {}, users.map(person))));
+
+  async function load() {
+    const users = await (await api("/api/admin/users")).json();
+    const waiting = users.filter(u => u.status === "pending");
+    keepFocus(main, () => {
+      pending.replaceChildren(...(waiting.length ? [h("h2", {}, `Waiting for approval (${waiting.length})`), table(waiting)] : []));
+      people.replaceChildren(h("h2", {}, `Accounts (${users.length})`), table(users.filter(u => u.status !== "pending")));
+    });
+  }
+
+  const inviteTo = h("input", {type: "email", autocomplete: "off", pattern: EMAIL}), linkBox = h("div", {class: "stack"});
+  const inviteStatus = statusEl(), rulesStatus = statusEl();
+  const make = h("button", {class: "primary"}, "Make an invite link");
+  const invite = h("form", {class: "panel", onsubmit: e => {
+    e.preventDefault();
+    busy(make, inviteStatus, async () => {
+      const r = await (await api("/api/admin/invites", formData({email: inviteTo.value.trim()}))).json();
+      const out = h("input", {type: "text", readOnly: true, value: r.link, "aria-label": "Invite link"});
+      const copy = button("Copy", async () => { try { await navigator.clipboard.writeText(r.link); copy.textContent = "Copied"; } catch { out.select(); } });
+      linkBox.replaceChildren(h("div", {class: "row"}, out, copy));
+      return r.sent ? `Invite sent to ${inviteTo.value.trim()}. The link works once, for 7 days.` : "Send this link to the person you're inviting. It works once, for 7 days.";
+    });
+  }}, h("h2", {}, "Invite someone"),
+    field("Their e-mail address (optional)", inviteTo, config.email ? "With an address the invite is e-mailed and only works for it." : "With an address the link only works for it."),
+    h("div", {class: "row"}, make), linkBox, inviteStatus);
+
+  const st = {signup: config.signup};
+  const quota = h("input", {type: "number", min: 0, step: 1, value: config.quota_mb ?? 1024});
+  const save = h("button", {class: "primary"}, "Save");
+  const rules = h("div", {});
+  const drawRules = () => rules.replaceChildren(choices("signup", "How people get an account", [
+    ["invite", "Only people I invite", "Invite links from this page."],
+    ["approval", "Anyone can ask, and an admin approves", "New accounts wait here until approved."],
+    ["open", "Anyone can sign up", "New accounts work straight away."],
+  ], () => st.signup, v => { st.signup = v; }, drawRules));
+  drawRules();
+  const settingsForm = h("form", {class: "panel", onsubmit: e => {
+    e.preventDefault();
+    busy(save, rulesStatus, async () => {
+      await api("/api/admin/settings", formData({signup: st.signup, quota_mb: quota.value || "0"}));
+      config.signup = st.signup;
+      config.quota_mb = +quota.value;
+      return "Saved.";
+    });
+  }}, h("h2", {}, "Rules"), h("h3", {}, "How people get an account"), rules,
+    field("Storage per account (MB)", quota, "0 means no limit."), h("div", {class: "row"}, save), rulesStatus);
+
+  load().catch(e => tell(status, e.message, true));
+  return h("div", {}, h("h1", {}, "Admin"), status, pending, people, invite, settingsForm);
+}
+
 // --- shell --------------------------------------------------------------------------------------
 
-const gated = () => config.setup || (config.login === "password" && !config.user);
+const gated = () => config.setup || (config.login === "accounts" && !config.user);
 
 function route(e) {
   const [, name = "", arg = ""] = location.hash.split("/");
+  const signed = config.user, admin = signed?.role === "admin";
   const view = config.setup ? setupView
     : name === "reset" ? resetView
+    : name === "signup" && (gated() || arg) ? signupView
     : gated() ? (name === "forgot" ? forgotView : loginView)
-    : {tool: toolView, organizer, editor, pipeline}[name] ?? home;
+    : {tool: toolView, organizer, editor, pipeline, files: signed && filesView, account: signed && accountView, admin: admin && adminView}[name] || home;
   main.className = view === toolView && byId(arg) && byId(arg).category !== "Internal" ? "split" : "";  // form and result side by side
   showResult(null);
   main.replaceChildren(view(arg), result);
@@ -810,7 +1106,10 @@ async function enter(e = {}) {  // e: as for route(); start() passes null, so a 
   document.body.classList.toggle("bare", bare);  // no navigation or search before setup and sign-in
   const out = document.getElementById("signout");
   out.hidden = !config.user;
-  out.title = config.user ? `Signed in as ${config.user}` : "";
+  out.title = config.user ? `Signed in as ${config.user.email}` : "";
+  for (const [id, show] of [["nav-files", config.user], ["nav-account", config.user], ["nav-admin", config.user?.role === "admin"]]) {
+    document.getElementById(id).hidden = !show;
+  }
   if (!bare && !tools.length) {
     try { tools = await (await api("/api/tools")).json(); }
     catch (e) { return main.replaceChildren(h("p", {class: "status error", role: "alert"}, `The tool list could not be loaded. ${e.message}`)); }
@@ -824,7 +1123,11 @@ async function refresh() {
 }
 
 async function start() {
-  try { config = {...config, ...await (await api("/api/config")).json()}; } catch { /* keep the defaults */ }
+  try { config = {...config, ...await (await api("/api/config")).json()}; } catch (e) {
+    document.body.classList.add("bare");
+    return main.replaceChildren(h("div", {class: "panel narrow"}, h("h1", {}, "pdfeditor can't start"),
+      h("p", {class: "status error", role: "alert"}, e.message), button("Try again", () => location.reload())));
+  }
   document.getElementById("brand").textContent = config.name;
   document.getElementById("signout").addEventListener("click", async () => {
     await api("/api/logout", new FormData()).catch(() => {});

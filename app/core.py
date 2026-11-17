@@ -2,6 +2,7 @@
 import inspect
 import io
 import json
+import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Callable, Literal, get_args, get_origin
 
 import pymupdf
-from fastapi import Form
+from fastapi import Form, HTTPException, UploadFile
 from PIL import Image
 from pydantic import TypeAdapter
 
@@ -135,6 +136,16 @@ def open_pdf(u: Upload, password: str = "") -> PDF:
 
 def safe_name(name: str) -> str:
     return re.sub(r"[^\w.\- ()]+", "_", name).strip(". ") or "file"
+
+
+MAX_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))
+
+
+def read(f: UploadFile) -> Upload:
+    data = f.file.read(MAX_MB * 2**20 + 1)  # also caps chunked uploads, which carry no Content-Length
+    if len(data) > MAX_MB * 2**20:
+        raise HTTPException(413, f"{f.filename} is larger than {MAX_MB} MB")
+    return Upload(safe_name(Path(f.filename or "file").name), data)
 
 
 def _data(x) -> bytes:

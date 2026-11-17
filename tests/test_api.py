@@ -74,6 +74,6 @@ def test_ui_gets_security_headers_and_config(client):
     assert page.headers["cache-control"] == "no-cache"
     assert "content-security-policy" not in client.get("/api/docs").headers  # the docs page loads a CDN script
     assert client.get("/api/config").json() == {"name": "pdfeditor", "max_upload_mb": 200, "setup": False, "login": "none",
-                                               "user": None, "user_label": "E-mail", "email": False, "reset": False}
+                                               "user": None, "email": False, "signup": None}
 
 

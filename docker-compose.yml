@@ -11,21 +11,34 @@ services:
       - "${BIND:-127.0.0.1}:${PORT:-8080}:8080"
     restart: unless-stopped
     volumes:
-      - data:/data   # the settings chosen in the first-run setup
+      - data:/data   # the setup's settings, and (by default) the accounts database and users' files
     environment:
       APP_NAME: ${APP_NAME:-pdfeditor}          # title shown in the UI and the API docs
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}      # largest accepted upload
       CONVERT_TIMEOUT: ${CONVERT_TIMEOUT:-300}  # seconds LibreOffice or OCR may spend on one file
       WORKERS: ${WORKERS:-2}                    # one PDF job at a time per worker
-      # Optional, instead of the first-run setup: a sign-in and mail server from .env (see .env.example).
-      # Ignored once setup has been done in the browser.
-      AUTH_USER: ${AUTH_USER:-admin}
-      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
-      SMTP_HOST: ${SMTP_HOST:-}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_USER: ${SMTP_USER:-}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      SMTP_FROM: ${SMTP_FROM:-}
+      # Optional: fix where accounts and files are kept, so the setup doesn't ask (see .env.example)
+      DATABASE_URL: ${DATABASE_URL:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+
+  # Optional Postgres, started only with: docker compose --profile postgres up -d
+  # Then use this address in the setup: postgresql://pdfeditor:<POSTGRES_PASSWORD>@postgres:5432/pdfeditor
+  # It has no published port, so only the app can reach it.
+  postgres:
+    image: postgres:17-alpine
+    profiles: [postgres]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pdfeditor
+      POSTGRES_DB: pdfeditor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres:/var/lib/postgresql/data
 
 volumes:
   data:
+  postgres:

@@ -44,6 +44,9 @@
 | 📎 **Files follow you** | Drop files once on the home page; they come along into whichever tool you open. A result can go straight into the next tool. |
 | 👀 **Results beside the form** | PDFs, images, text, JSON and HTML are previewed next to the form, with a download button. |
 | 📦 **Batches** | Give a one-file tool several files and get a zip back. Almost every tool accepts password-protected PDFs. |
+| 👥 **Accounts** | Optional accounts with an admin, invite links, sign-up with approval or open sign-up, and password reset by e-mail. |
+| 🗄️ **My files** | Each account has its own file library, on this server's disk or in any S3-compatible bucket, with a quota. |
+| 🐘 **SQLite or Postgres** | Accounts live in a SQLite file by default, or in Postgres. The setup tests the connection for you. |
 | ✉️ **E-mail a result** | Optional: send any result as an attachment through your own mail server. |
 | 🌗 **Light and dark** | Follows your system, or pick one with the button in the header. Works on a phone. |
 | 🐳 **One command to run** | `docker compose up -d --build`. LibreOffice, Tesseract and Ghostscript are inside the image. |
@@ -98,17 +101,41 @@ Open <http://localhost:8080>. The first build downloads LibreOffice and takes a 
 The first time it starts, pdfeditor opens a short setup in the browser:
 
 1. **Setup code.** It proves you run the server. Copy it from the log: `docker compose logs pdfeditor`.
-2. **Who can use it.** Either *only people with the password* (sign in with an e-mail address and a password), or
-   *anyone who can open the page* (no sign-in).
-3. **E-mail (optional, with a sign-in only).** Your mail server's details, with a button that sends a test message.
-   It lets results be e-mailed and a forgotten password be reset by e-mail.
+2. **Who can use it.** *People with an account*, or *anyone who can open the page* (no accounts, no file
+   libraries; the setup ends here).
+3. **Your admin account.** An e-mail address and a password.
+4. **Sign-up.** How other people get an account: *only people I invite*, *anyone can ask and an admin approves*,
+   or *anyone can sign up*. You can change it later on the admin page.
+5. **Storage.** Accounts in a SQLite file on this server, or in Postgres. Files on this server's disk, or in an
+   S3-compatible bucket (Amazon S3, Cloudflare R2, Backblaze B2, MinIO...). Each is tested before you go on.
+6. **E-mail (optional).** Your mail server, with a button that sends a test message. It lets results be e-mailed,
+   passwords be reset, invites be sent, and admins hear about new sign-ups.
 
-The choices are kept in the `data` volume, so they survive restarts and updates. To start the setup over, delete
+Upgrading from a version that read `AUTH_PASSWORD` and `SMTP_*` from `.env`: those are no longer read, so the app
+starts in setup mode once (it says so in the log). A server already set up in the browser keeps its sign-in, which
+becomes the admin account.
+
+The settings are kept in the `data` volume, so they survive restarts and updates. To start the setup over, delete
 `settings.json` from that volume and restart: `docker compose exec pdfeditor rm /data/settings.json`, then
-`docker compose restart`.
+`docker compose restart`. Accounts and files stay where they are, and an admin address you enter again becomes
+the admin again.
+
+To keep accounts in Postgres without running one yourself, start the bundled one with
+`docker compose --profile postgres up -d` (set `POSTGRES_PASSWORD` in `.env` first) and give the setup
+`postgresql://pdfeditor:<POSTGRES_PASSWORD>@postgres:5432/pdfeditor`.
+
+### Accounts and My files
+
+- **Signing up:** with invites, an admin makes a one-time link on the **Admin** page (e-mailed when e-mail is set
+  up). With approval, new accounts wait on the Admin page until an admin approves them.
+- **Admin page:** approve, turn off, delete, make admin, make invite links, change the sign-up rule and the
+  storage allowed per account (1 GB unless you change it). Deleting an account deletes its files.
+- **My files:** add files, open one in any tool, download, rename, delete. Every result has a **Save to My files**
+  button. Each account sees only its own files.
+- **Account page:** change your password; every other browser signed in as you is signed out.
 
 > [!IMPORTANT]
-> Out of the box the app only answers on the machine it runs on. To reach it from other devices, choose a sign-in
+> Out of the box the app only answers on the machine it runs on. To reach it from other devices, choose accounts
 > in the setup, then set `BIND=0.0.0.0` in a `.env` file (copy `.env.example`) and run `docker compose up -d` again.
 > See [Security notes](#security-notes) before exposing it.
 
@@ -290,7 +317,7 @@ curl -F files=@scan.pdf -o out.pdf http://localhost:8080/api/pipeline \
   -F 'steps=[{"tool": "remove-blank"}, {"tool": "ocr"}, {"tool": "compress", "params": {"level": "high"}}]'
 ```
 
-With a sign-in set, add `-u you@example.com:yourpassword`. Errors come back as JSON: `{"detail": "what went
+With accounts, add `-u you@example.com:yourpassword`; My files is at `/api/files` (see `/api/docs`). Errors come back as JSON: `{"detail": "what went
 wrong"}`. A setting with an invalid value is HTTP 422, where `detail` is a list naming each bad field; a missing or
 wrong sign-in is HTTP 401, and a server that still needs its first-run setup answers 503.
 
@@ -304,10 +331,13 @@ flowchart LR
     B["Browser UI<br>one ES module, no build step"] -->|multipart POST| G
     C["curl and scripts"] -->|multipart POST| G
     subgraph APP["One container: FastAPI app"]
-        G["Guard<br>login, upload limit, security headers"] --> T["Tool registry<br>one decorated function per tool"]
+        G["Guard<br>sign-in, upload limit, security headers"] --> T["Tool registry<br>one decorated function per tool"]
         G --> P["Pipeline<br>feeds each step into the next"]
         P --> T
+        G --> A["Accounts and My files"]
     end
+    A --> D[("SQLite or Postgres")]
+    A --> F[("Disk or S3")]
     T --> M["PyMuPDF<br>pages, text, redaction, rendering"]
     T --> L["LibreOffice<br>Office documents to and from PDF"]
     T --> O["OCRmyPDF, Tesseract, Ghostscript<br>OCR and PDF/A"]
@@ -343,14 +373,17 @@ Set these in a `.env` file next to `docker-compose.yml` (copy `.env.example`).
 | `WORKERS` | `2` | Server processes. Each handles one PDF job at a time. |
 | `APP_NAME` | `pdfeditor` | Title shown in the UI and the API docs. |
 | `OCR_LANGS` | `eng` | Tesseract languages built into the image, e.g. `eng deu fra` (build-time). |
-| `AUTH_USER`, `AUTH_PASSWORD` | `admin`, empty | Optional, instead of the first-run setup: a password sign-in with this user name. Ignored once the setup has been done. |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | empty, `587` | Optional, with `AUTH_PASSWORD`: the mail server. |
+| `DATABASE_URL` | empty | Optional: a `postgresql://` address. When set, the setup doesn't ask where accounts are kept. |
+| `S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | empty | Optional: an S3 bucket for users' files. When set, the setup doesn't ask. |
+| `POSTGRES_PASSWORD` | `change-me` | Password of the bundled Postgres (`--profile postgres` only). |
+
+Sign-in, sign-up and the mail server are chosen in the first-run setup, not here.
 
 ### E-mailing results
 
-Give a mail server in the first-run setup (or set `SMTP_HOST`, a sender and `AUTH_PASSWORD`). Every result then gets
-an "E-mail this file to" field, and the sign-in page a "Forgot your password?" link. E-mail needs a sign-in, so that
-nobody who merely reaches the app can send mail from your domain.
+Give a mail server in the first-run setup. Every result then gets an "E-mail this file to" field, and the sign-in
+page a "Forgot your password?" link. E-mail needs accounts, so that nobody who merely reaches the app can send mail
+from your domain.
 
 - Port 465 uses TLS from the start, any other port STARTTLS; a server without TLS is refused.
 - One recipient per message, and attachments up to 20 MB.
@@ -358,12 +391,17 @@ nobody who merely reaches the app can send mail from your domain.
 ## Security notes
 
 > [!WARNING]
-> Choose *only people with the password* in the setup, and put the app behind HTTPS, before exposing it beyond a
-> network you trust. Passwords travel in the clear over plain HTTP.
+> Choose *people with an account* in the setup, and put the app behind HTTPS, before exposing it beyond a network
+> you trust. Passwords travel in the clear over plain HTTP. Use *anyone can sign up* only if you are happy for
+> strangers to use your server and its storage.
 
 - Until the setup is done, every tool is closed and the setup needs the code from the server's log, so someone who
-  reaches the page first can't take it over. The password is stored as a scrypt hash; the mail server's password is
-  stored as given, in a file only the app can read. Changing the password signs out every browser.
+  reaches the page first can't take it over.
+- Passwords are stored as scrypt hashes, invite links as SHA-256 hashes. The mail, Postgres and S3 passwords are
+  stored as given, in a file only the app can read; set them through the environment instead if you prefer.
+- Sessions are signed cookies (HttpOnly, SameSite=Strict); posts from other sites are refused. A new password, or an
+  admin turning an account off, ends that account's sessions at once.
+- Sign-up does not check that an address belongs to the person signing up. Use invites or approval if that matters.
 
 - "Web page to PDF" and HTML conversion only fetch from public internet addresses and never run JavaScript. The
   address check and the download resolve the name separately, so a hostile DNS server could still redirect one to an
@@ -375,8 +413,9 @@ nobody who merely reaches the app can send mail from your domain.
 
 ## Limits
 
-- One account; no multiple users, roles or single sign-on. No settings page yet: to change the password, use
-  "Forgot your password?" (with e-mail set up) or run the setup again.
+- Two roles (admin and user); no teams, shared folders or single sign-on. Files can't be shared between accounts.
+- The mail server, database and storage can be changed only by running the setup again.
+- Files are read into memory whole, so the upload limit (`MAX_UPLOAD_MB`) is also the largest file in My files.
 - English interface only.
 - Certificate signing takes PKCS#12 (`.p12`/`.pfx`) files only.
 - Scanned stacks are split at blank separator sheets, not QR-code sheets.
@@ -392,9 +431,12 @@ python -m venv .venv
 .venv/Scripts/python -m uvicorn app.main:app --port 8080      # the app, without Docker
 ```
 
-Tests that need LibreOffice, Tesseract, Ghostscript or WeasyPrint are skipped when those are missing. CI runs the
-whole suite inside the Docker image with `REQUIRE_ALL=1`, where a missing program is a failure instead of a skip,
-and then smoke-tests the running container over HTTP:
+Tests that need LibreOffice, Tesseract, Ghostscript or WeasyPrint are skipped when those are missing. The account and
+file tests run on SQLite with files on disk, and also on Postgres with files in S3 when `TEST_DATABASE_URL` and
+`TEST_S3_ENDPOINT` point at test servers (`docker run -p 5432:5432 -e POSTGRES_PASSWORD=test postgres:17-alpine`,
+`docker run -p 5000:5000 motoserver/moto`). CI runs the whole suite inside the Docker image with both servers and
+`REQUIRE_ALL=1`, where anything missing is a failure instead of a skip, and then smoke-tests the running container
+over HTTP:
 
 ```bash
 docker build -t pdfeditor:dev .
@@ -409,11 +451,14 @@ rewrites the `/srv/...` paths and nothing is mounted.
 ```text
 app/
   core.py        the tool registry, page selections and shared drawing helpers
-  main.py        the FastAPI app: one endpoint per tool, the pipeline, setup, sign-in, e-mail
-  settings.py    the first-run settings file, password hashing and signed sessions
+  main.py        the FastAPI app: one endpoint per tool, the pipeline, and the guard in front of everything
+  accounts.py    first-run setup, sign-up and sign-in, admin, e-mail and My files
+  settings.py    the settings file, password hashing and signed sessions
+  db.py          accounts and file records in SQLite or Postgres
+  storage.py     users' files on disk or in S3
   tools/         the tools themselves: pages, convert, edit, security, other
   static/        the web page: index.html, style.css, app.js
-tests/           more than 200 tests: every tool, the HTTP layer, page geometry
+tests/           more than 240 tests: every tool, the HTTP layer, accounts and files, page geometry
 Dockerfile, docker-compose.yml, .github/workflows/ci.yml
 ```
 

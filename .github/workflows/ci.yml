@@ -31,10 +31,20 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # REQUIRE_ALL turns "LibreOffice, OCR or WeasyPrint is missing" from a skip into a failure
+      # the account and file tests also run on Postgres with files in S3 (moto stands in for S3)
+      - name: Start Postgres and S3 for the tests
+        run: |
+          docker network create tests
+          docker run -d --name pg --network tests -e POSTGRES_PASSWORD=test postgres:17-alpine
+          docker run -d --name s3 --network tests -p 127.0.0.1:55000:5000 motoserver/moto:5.1.4
+          timeout 60 sh -c 'until docker exec pg pg_isready -U postgres -q; do sleep 1; done'
+          timeout 60 sh -c 'until curl -fsS -o /dev/null http://127.0.0.1:55000/; do sleep 1; done'
+
+      # REQUIRE_ALL turns "LibreOffice, OCR, WeasyPrint, Postgres or S3 is missing" from a skip into a failure
       - name: Run the tests inside the image
         run: |
-          docker run --rm -e REQUIRE_ALL=1 \
+          docker run --rm -e REQUIRE_ALL=1 --network tests \
+            -e TEST_DATABASE_URL=postgresql://postgres:test@pg:5432/postgres -e TEST_S3_ENDPOINT=http://s3:5000 \
             -v "$PWD/tests:/srv/tests:ro" \
             -v "$PWD/pyproject.toml:/srv/pyproject.toml:ro" \
             -v "$PWD/requirements-dev.txt:/srv/requirements-dev.txt:ro" \
@@ -50,15 +60,20 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/tools/rotate)" = 503
           code=$(docker exec pdfeditor cat /data/setup-code)
           docker logs pdfeditor 2>&1 | grep -qF -- "$code"
-          curl -fsS -F code="$code" -F login=password -F email=ci@example.com -F password=ci-smoke-test -c jar http://localhost:8080/api/setup
+          curl -fsS -F code="$code" -F login=accounts -F email=ci@example.com -F password=ci-smoke-test -c jar http://localhost:8080/api/setup
           docker exec pdfeditor python -c "import sys, pymupdf; d = pymupdf.open(); d.new_page(); sys.stdout.buffer.write(d.tobytes())" > tiny.pdf
           test "$(curl -s -o /dev/null -w '%{http_code}' -F files=@tiny.pdf http://localhost:8080/api/tools/rotate)" = 401
           curl -fsS -b jar -F files=@tiny.pdf -F angle=90 -o rotated.pdf http://localhost:8080/api/tools/rotate
           head -c 5 rotated.pdf | grep -q "%PDF-"
-          # the settings survive a restart
+          # My files keeps a file and gives the same bytes back
+          id=$(curl -fsS -b jar -F files=@rotated.pdf http://localhost:8080/api/files | python3 -c "import json, sys; print(json.load(sys.stdin)['added'][0])")
+          curl -fsS -b jar -o back.pdf "http://localhost:8080/api/files/$id"
+          cmp rotated.pdf back.pdf
+          # the settings and the account survive a restart
           docker restart pdfeditor
           timeout 120 sh -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" pdfeditor)" = healthy ]; do sleep 2; done'
           curl -fsS -u ci@example.com:ci-smoke-test -F files=@tiny.pdf -o rotated.pdf http://localhost:8080/api/tools/rotate
+          curl -fsS -u ci@example.com:ci-smoke-test -o back.pdf "http://localhost:8080/api/files/$id"
 
       - name: Container logs
         if: failure()
