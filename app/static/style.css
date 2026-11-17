@@ -165,6 +165,27 @@ input.typing {  /* where text is typed onto the page */
 }
 .pad { background: #ffffff; box-shadow: 0 0 0 1px var(--line); border-radius: var(--radius); cursor: crosshair; }
 
+/* setup and sign-in */
+body.bare nav, body.bare #search { display: none; }
+body.bare header { justify-content: space-between; }
+.narrow { max-width: 36rem; margin: 2rem auto; }
+.stack { display: grid; gap: .75rem; }
+.stack > h2 { margin: 0; }
+.stack > h2:focus { outline: none; }  /* focused by script when a step opens, so screen readers read it */
+.choice {
+  display: grid; grid-template-columns: auto 1fr; gap: .75rem; align-items: start; padding: .85rem 1rem; cursor: pointer;
+  border: 1px solid var(--line); border-radius: var(--radius); transition: border-color .15s, background .15s;
+}
+.choice:hover { border-color: var(--accent); }
+.choice:has(input:checked) { border-color: var(--accent); background: var(--soft); }
+.choice input { width: 1.15rem; height: 1.15rem; margin: .2rem 0 0; accent-color: var(--accent); }
+.choice small { display: block; }
+.progress { display: flex; gap: .5rem; margin: 0; padding: 0; list-style: none; font-size: .85rem; color: var(--muted); }
+.progress li { flex: 1; padding-top: .35rem; border-top: 4px solid var(--line); }
+.progress li.done, .progress li[aria-current] { border-color: var(--accent); }
+.progress li[aria-current] { color: var(--text); font-weight: 600; }
+.narrow .fields { grid-template-columns: 1fr; }
+
 /* pipeline */
 .steps { display: grid; gap: .75rem; }
 .steps li { display: grid; gap: .75rem; padding: .75rem; border: 1px solid var(--line); border-radius: var(--radius); }

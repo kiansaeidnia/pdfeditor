@@ -93,10 +93,24 @@ docker compose up -d --build
 
 Open <http://localhost:8080>. The first build downloads LibreOffice and takes a few minutes; the image is about 1.2 GB.
 
+### First-run setup
+
+The first time it starts, pdfeditor opens a short setup in the browser:
+
+1. **Setup code.** It proves you run the server. Copy it from the log: `docker compose logs pdfeditor`.
+2. **Who can use it.** Either *only people with the password* (sign in with an e-mail address and a password), or
+   *anyone who can open the page* (no sign-in).
+3. **E-mail (optional, with a sign-in only).** Your mail server's details, with a button that sends a test message.
+   It lets results be e-mailed and a forgotten password be reset by e-mail.
+
+The choices are kept in the `data` volume, so they survive restarts and updates. To start the setup over, delete
+`settings.json` from that volume and restart: `docker compose exec pdfeditor rm /data/settings.json`, then
+`docker compose restart`.
+
 > [!IMPORTANT]
-> Out of the box the app only answers on the machine it runs on, and it has **no login**. To reach it from other
-> devices, set `AUTH_PASSWORD` **and** `BIND=0.0.0.0` in a `.env` file (copy `.env.example`), then run
-> `docker compose up -d` again. See [Security notes](#security-notes) before exposing it.
+> Out of the box the app only answers on the machine it runs on. To reach it from other devices, choose a sign-in
+> in the setup, then set `BIND=0.0.0.0` in a `.env` file (copy `.env.example`) and run `docker compose up -d` again.
+> See [Security notes](#security-notes) before exposing it.
 
 ### Ready-made image
 
@@ -276,9 +290,9 @@ curl -F files=@scan.pdf -o out.pdf http://localhost:8080/api/pipeline \
   -F 'steps=[{"tool": "remove-blank"}, {"tool": "ocr"}, {"tool": "compress", "params": {"level": "high"}}]'
 ```
 
-With a login set, add `-u admin:yourpassword`. Errors come back as JSON: `{"detail": "what went wrong"}`. A setting
-with an invalid value is HTTP 422, where `detail` is a list naming each bad field; a missing or wrong login is a
-bare 401 with no body.
+With a sign-in set, add `-u you@example.com:yourpassword`. Errors come back as JSON: `{"detail": "what went
+wrong"}`. A setting with an invalid value is HTTP 422, where `detail` is a list naming each bad field; a missing or
+wrong sign-in is HTTP 401, and a server that still needs its first-run setup answers 503.
 
 A pipeline takes up to 30 steps. Tools that take a second upload, even an optional one, can't be a step: `overlay`,
 `stamp`, `watermark`, `attach` and `sign`.
@@ -324,20 +338,19 @@ Set these in a `.env` file next to `docker-compose.yml` (copy `.env.example`).
 |---|---|---|
 | `BIND` | `127.0.0.1` | Address the app is published on. The default is this machine only; `0.0.0.0` opens it to the network. |
 | `PORT` | `8080` | Port it is published on. |
-| `AUTH_USER` | `admin` | Login name. |
-| `AUTH_PASSWORD` | empty | Login password. **Empty means no login at all.** |
 | `MAX_UPLOAD_MB` | `200` | Largest accepted request. |
 | `CONVERT_TIMEOUT` | `300` | Seconds LibreOffice or OCR may spend on one file. |
 | `WORKERS` | `2` | Server processes. Each handles one PDF job at a time. |
 | `APP_NAME` | `pdfeditor` | Title shown in the UI and the API docs. |
 | `OCR_LANGS` | `eng` | Tesseract languages built into the image, e.g. `eng deu fra` (build-time). |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | empty, `587` | Lets users e-mail a result. See below. |
+| `AUTH_USER`, `AUTH_PASSWORD` | `admin`, empty | Optional, instead of the first-run setup: a password sign-in with this user name. Ignored once the setup has been done. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | empty, `587` | Optional, with `AUTH_PASSWORD`: the mail server. |
 
 ### E-mailing results
 
-Set `SMTP_HOST` and a sender (`SMTP_FROM`, or `SMTP_USER` if they are the same) **and** `AUTH_PASSWORD`. Every
-result then gets an "E-mail this file to" field. E-mail stays off without a login password, so that nobody who
-merely reaches the app can send mail from your domain.
+Give a mail server in the first-run setup (or set `SMTP_HOST`, a sender and `AUTH_PASSWORD`). Every result then gets
+an "E-mail this file to" field, and the sign-in page a "Forgot your password?" link. E-mail needs a sign-in, so that
+nobody who merely reaches the app can send mail from your domain.
 
 - Port 465 uses TLS from the start, any other port STARTTLS; a server without TLS is refused.
 - One recipient per message, and attachments up to 20 MB.
@@ -345,8 +358,12 @@ merely reaches the app can send mail from your domain.
 ## Security notes
 
 > [!WARNING]
-> There is **no login until you set `AUTH_PASSWORD`**. Set it, and put the app behind HTTPS, before exposing it
-> beyond a network you trust. The login is HTTP Basic, which is only safe over HTTPS.
+> Choose *only people with the password* in the setup, and put the app behind HTTPS, before exposing it beyond a
+> network you trust. Passwords travel in the clear over plain HTTP.
+
+- Until the setup is done, every tool is closed and the setup needs the code from the server's log, so someone who
+  reaches the page first can't take it over. The password is stored as a scrypt hash; the mail server's password is
+  stored as given, in a file only the app can read. Changing the password signs out every browser.
 
 - "Web page to PDF" and HTML conversion only fetch from public internet addresses and never run JavaScript. The
   address check and the download resolve the name separately, so a hostile DNS server could still redirect one to an
@@ -358,7 +375,8 @@ merely reaches the app can send mail from your domain.
 
 ## Limits
 
-- One shared login; no user accounts, roles or single sign-on.
+- One account; no multiple users, roles or single sign-on. No settings page yet: to change the password, use
+  "Forgot your password?" (with e-mail set up) or run the setup again.
 - English interface only.
 - Certificate signing takes PKCS#12 (`.p12`/`.pfx`) files only.
 - Scanned stacks are split at blank separator sheets, not QR-code sheets.
@@ -391,7 +409,8 @@ rewrites the `/srv/...` paths and nothing is mounted.
 ```text
 app/
   core.py        the tool registry, page selections and shared drawing helpers
-  main.py        the FastAPI app: one endpoint per tool, the pipeline, login, e-mail
+  main.py        the FastAPI app: one endpoint per tool, the pipeline, setup, sign-in, e-mail
+  settings.py    the first-run settings file, password hashing and signed sessions
   tools/         the tools themselves: pages, convert, edit, security, other
   static/        the web page: index.html, style.css, app.js
 tests/           more than 200 tests: every tool, the HTTP layer, page geometry

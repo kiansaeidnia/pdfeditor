@@ -46,9 +46,19 @@ jobs:
           timeout 120 sh -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" pdfeditor)" = healthy ]; do sleep 2; done'
           curl -fsS http://localhost:8080/api/health
           curl -fsS -o /dev/null -w "%{content_type}" http://localhost:8080/ | grep -q text/html
+          # a new container is in setup mode: tools are closed until the setup, done here with the code from the log
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/tools/rotate)" = 503
+          code=$(docker exec pdfeditor cat /data/setup-code)
+          docker logs pdfeditor 2>&1 | grep -qF -- "$code"
+          curl -fsS -F code="$code" -F login=password -F email=ci@example.com -F password=ci-smoke-test -c jar http://localhost:8080/api/setup
           docker exec pdfeditor python -c "import sys, pymupdf; d = pymupdf.open(); d.new_page(); sys.stdout.buffer.write(d.tobytes())" > tiny.pdf
-          curl -fsS -F files=@tiny.pdf -F angle=90 -o rotated.pdf http://localhost:8080/api/tools/rotate
+          test "$(curl -s -o /dev/null -w '%{http_code}' -F files=@tiny.pdf http://localhost:8080/api/tools/rotate)" = 401
+          curl -fsS -b jar -F files=@tiny.pdf -F angle=90 -o rotated.pdf http://localhost:8080/api/tools/rotate
           head -c 5 rotated.pdf | grep -q "%PDF-"
+          # the settings survive a restart
+          docker restart pdfeditor
+          timeout 120 sh -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" pdfeditor)" = healthy ]; do sleep 2; done'
+          curl -fsS -u ci@example.com:ci-smoke-test -F files=@tiny.pdf -o rotated.pdf http://localhost:8080/api/tools/rotate
 
       - name: Container logs
         if: failure()

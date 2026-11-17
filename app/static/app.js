@@ -1,5 +1,6 @@
 // pdfeditor web UI: one ES module, no build step. Every form is rendered from the schema in /api/tools.
 const ORDER = ["Pages", "Convert", "Edit", "Security", "Inspect"];
+const EMAIL = "[^@\\s,;<>]+@[^@\\s,;<>]+\\.[^@\\s,;<>]+";  // the server's rule: the domain needs a dot
 const DPI = 110, PT = 72 / DPI;  // editor page pictures, and the size of one of their pixels in PDF points
 let config = {name: "pdfeditor", email: false, max_upload_mb: 200};
 let tools = [], uid = 0, resultUrl;
@@ -49,6 +50,11 @@ const iconButton = (text, name, k, onclick, disabled) =>
 async function api(path, body) {
   const res = await fetch(path, body && {method: "POST", body}).catch(() => { throw new Error("Can't reach the server."); });
   if (res.ok) return res;
+  if (res.status === 401 && config.user && path !== "/api/login") {  // the session ran out: back to the sign-in page
+    config.user = null;
+    config.expired = true;
+    setTimeout(enter);
+  }
   const detail = (await res.json().catch(() => ({}))).detail;
   if (Array.isArray(detail)) throw new Error(detail.map(d => `${d.loc?.at(-1) ?? "input"}: ${d.msg}`).join("\n"));
   throw new Error(typeof detail === "string" ? detail : `The server answered ${res.status} ${res.statusText}`);
@@ -634,11 +640,158 @@ function pipeline() {
     h("div", {class: "row"}, button("Load", load), run), status);
 }
 
+// --- first-run setup and sign-in ----------------------------------------------------------------
+
+// The setup wizard: setup code, then who may use the app, then (with a sign-in) an optional mail server.
+function setupView() {
+  const st = {step: 0, login: "password", mail: false};
+  const text = props => h("input", {type: "text", autocomplete: "off", spellcheck: false, autocapitalize: "off", ...props});
+  const code = text({});
+  const email = h("input", {type: "email", autocomplete: "username", pattern: EMAIL});
+  const pass = h("input", {type: "password", autocomplete: "new-password"});
+  const again = h("input", {type: "password", autocomplete: "new-password"});
+  const host = text({placeholder: "mail.example.com"});
+  const port = h("select", {}, h("option", {value: "587"}, "587 (STARTTLS, the usual one)"), h("option", {value: "465"}, "465 (TLS)"));
+  const muser = text({});
+  const mpass = h("input", {type: "password", autocomplete: "off"});
+  const from = h("input", {type: "email", autocomplete: "off", placeholder: "pdf@example.com", pattern: EMAIL});
+  const status = statusEl(), next = h("button", {class: "primary"}), progress = h("ol", {class: "progress"}), body = h("div", {class: "stack"});
+  const back = button("Back", () => { st.step--; draw(); });
+  const choice = (value, title, hint) => h("label", {class: "choice"},
+    h("input", {type: "radio", name: "login", value, checked: st.login === value, onchange: () => {
+      st.login = value;
+      draw(false);  // keep the focus on the choice, so arrow keys go on working
+      body.querySelector(`input[value=${value}]`).focus();
+    }}),
+    h("span", {}, h("strong", {}, title), h("small", {}, hint)));
+  const smtp = () => st.mail && st.login === "password" ? {smtp_host: host.value.trim(), smtp_port: port.value, smtp_user: muser.value.trim(), smtp_password: mpass.value, smtp_from: from.value.trim()} : {};
+  const useMail = h("input", {type: "checkbox", onchange: () => { st.mail = useMail.checked; draw(false); useMail.focus(); }});
+  const test = button("Send a test e-mail", () => busy(test, status, async () => {
+    check(2);
+    await api("/api/setup/test-email", formData({code: code.value, to: email.value.trim(), ...smtp()}));
+    return `Test e-mail sent to ${email.value.trim()}. If it doesn't arrive, check the spam folder and the settings.`;
+  }));
+  const mailFields = h("div", {class: "fields"}, field("Mail server", host, "", true), field("Port", port),
+    field("User name", muser, "Often the full e-mail address."), field("Password", mpass),
+    field("Send from", from, "Leave empty to use the user name, if it is an e-mail address."), h("div", {class: "row"}, test));
+  const names = () => st.login === "password" ? ["Setup code", "Sign-in", "E-mail"] : ["Setup code", "Sign-in"];
+  const pages = [
+    () => [h("h2", {tabIndex: -1}, "Enter your setup code"),
+      h("p", {}, "This proves you run this server. The code is in the container's log: on the machine running pdfeditor, run"),
+      h("pre", {}, "docker compose logs pdfeditor"), field("Setup code", code, "", true)],
+    () => [h("h2", {tabIndex: -1}, "Who can use pdfeditor?"),
+      h("div", {class: "stack", role: "radiogroup", "aria-label": "Who can use pdfeditor"},
+        choice("password", "Only people with the password", "Sign in with an e-mail address and a password. Needed to send e-mail."),
+        choice("none", "Anyone who can open this page", "No sign-in. Fine when only you can reach this computer.")),
+      st.login === "password" && h("div", {class: "fields"}, field("Your e-mail address", email, "You sign in with it.", true),
+        field("Password", pass, "At least 8 characters.", true), field("Password again", again, "", true))],
+    () => [h("h2", {tabIndex: -1}, "Sending e-mail (optional)"),
+      h("p", {}, "With a mail server, results can be e-mailed from the result panel, and a forgotten password can be reset by e-mail."),
+      field("Send e-mail through my mail server", useMail), st.mail ? mailFields : h("p", {class: "empty"}, "You can skip this: everything else works without it.")],
+  ];
+
+  // throws the first problem on step n, so the user is told before moving on
+  function check(n) {
+    if (n === 0 && !code.value.trim()) throw new Error("Enter the setup code.");
+    if (n === 1 && st.login === "password") {
+      if (!email.value.trim() || !email.checkValidity()) throw new Error("Enter a valid e-mail address.");
+      if (pass.value.length < 8) throw new Error("The password needs at least 8 characters.");
+      if (pass.value !== again.value) throw new Error("The two passwords are not the same.");
+    }
+    if (n === 2 && st.mail) {
+      if (!host.value.trim()) throw new Error("Enter the mail server, e.g. mail.example.com.");
+      if (!(from.value.trim() || muser.value.includes("@"))) throw new Error("Enter the address mail is sent from.");
+      if (!from.checkValidity()) throw new Error("“Send from” is not a valid e-mail address.");
+    }
+  }
+
+  function draw(focus = true) {
+    const all = names(), last = st.step === all.length - 1;
+    useMail.checked = st.mail;
+    progress.replaceChildren(...all.map((n, i) => h("li", {class: i < st.step ? "done" : "", "aria-current": i === st.step ? "step" : null}, n)));
+    body.replaceChildren(...pages[st.step]().flat().filter(Boolean));
+    next.textContent = last ? "Finish setup" : "Next";
+    back.hidden = st.step === 0;
+    tell(status, "");
+    if (focus) body.querySelector("h2").focus();
+  }
+
+  const form = h("form", {class: "panel narrow", onsubmit: e => {
+    e.preventDefault();
+    busy(next, status, async () => {
+      check(st.step);
+      if (st.step === 0) await api("/api/setup/code", formData({code: code.value}));
+      if (st.step < names().length - 1) {
+        st.step++;
+        return draw();
+      }
+      const login = st.login === "password" ? {email: email.value.trim(), password: pass.value} : {};
+      await api("/api/setup", formData({code: code.value, login: st.login, app_url: location.origin, ...login, ...smtp()}));
+      location.hash = "#/";
+      await refresh();
+      say("Setup is finished.");
+    });
+  }}, h("h1", {}, `Set up ${config.name}`), progress, body, h("div", {class: "row"}, back, next), status);
+  draw(false);
+  return form;
+}
+
+function loginView() {
+  const email = h("input", {type: config.user_label === "E-mail" ? "email" : "text", autocomplete: "username", required: true});
+  const pass = h("input", {type: "password", autocomplete: "current-password", required: true});
+  const status = statusEl(), go = h("button", {class: "primary"}, "Sign in");
+  return h("form", {class: "panel narrow", onsubmit: e => {
+    e.preventDefault();
+    busy(go, status, async () => {
+      await api("/api/login", formData({email: email.value, password: pass.value}));
+      config.expired = false;
+      await refresh();
+    });
+  }}, h("h1", {}, `Sign in to ${config.name}`), field(config.user_label, email), field("Password", pass),
+    h("div", {class: "row"}, go), config.reset && h("p", {}, h("a", {href: "#/forgot"}, "Forgot your password?")),
+    config.expired ? h("p", {class: "status", role: "status"}, "You were signed out. Sign in again to carry on: your chosen files are still here.") : status);
+}
+
+function forgotView() {
+  const email = h("input", {type: "email", autocomplete: "username", required: true});
+  const status = statusEl(), go = h("button", {class: "primary"}, "Send me a link");
+  return h("form", {class: "panel narrow", onsubmit: e => {
+    e.preventDefault();
+    busy(go, status, async () => {
+      await api("/api/forgot", formData({email: email.value}));
+      return "If that address can sign in here, a link to set a new password is on its way. It works for 30 minutes.";
+    });
+  }}, h("p", {class: "crumb"}, h("a", {href: "#/"}, "← Sign in")), h("h1", {}, "Forgot your password?"),
+    h("p", {}, "We'll e-mail you a link to set a new one."), field("Your e-mail address", email), h("div", {class: "row"}, go), status);
+}
+
+function resetView(token) {
+  const pass = h("input", {type: "password", autocomplete: "new-password", required: true, minLength: 8});
+  const again = h("input", {type: "password", autocomplete: "new-password", required: true});
+  const status = statusEl(), go = h("button", {class: "primary"}, "Set password");
+  return h("form", {class: "panel narrow", onsubmit: e => {
+    e.preventDefault();
+    busy(go, status, async () => {
+      if (pass.value !== again.value) throw new Error("The two passwords are not the same.");
+      await api("/api/reset", formData({token, password: pass.value}));
+      location.hash = "#/";
+      await refresh();
+      say("Your new password is set.");
+    });
+  }}, h("h1", {}, "Set a new password"), field("New password", pass, "At least 8 characters."), field("New password again", again),
+    h("div", {class: "row"}, go), status);
+}
+
 // --- shell --------------------------------------------------------------------------------------
+
+const gated = () => config.setup || (config.login === "password" && !config.user);
 
 function route(e) {
   const [, name = "", arg = ""] = location.hash.split("/");
-  const view = {tool: toolView, organizer, editor, pipeline}[name] ?? home;
+  const view = config.setup ? setupView
+    : name === "reset" ? resetView
+    : gated() ? (name === "forgot" ? forgotView : loginView)
+    : {tool: toolView, organizer, editor, pipeline}[name] ?? home;
   main.className = view === toolView && byId(arg) && byId(arg).category !== "Internal" ? "split" : "";  // form and result side by side
   showResult(null);
   main.replaceChildren(view(arg), result);
@@ -651,11 +804,33 @@ function route(e) {
   if (e && document.activeElement !== search) main.focus({preventScroll: true});  // on navigation, not on first load or while searching
 }
 
+// Show setup, the sign-in page or the app, whichever the server's state calls for
+async function enter(e = {}) {  // e: as for route(); start() passes null, so a reload keeps its scroll
+  const bare = gated();
+  document.body.classList.toggle("bare", bare);  // no navigation or search before setup and sign-in
+  const out = document.getElementById("signout");
+  out.hidden = !config.user;
+  out.title = config.user ? `Signed in as ${config.user}` : "";
+  if (!bare && !tools.length) {
+    try { tools = await (await api("/api/tools")).json(); }
+    catch (e) { return main.replaceChildren(h("p", {class: "status error", role: "alert"}, `The tool list could not be loaded. ${e.message}`)); }
+  }
+  route(e);
+}
+
+async function refresh() {
+  config = {...config, ...await (await api("/api/config")).json()};
+  await enter();
+}
+
 async function start() {
   try { config = {...config, ...await (await api("/api/config")).json()}; } catch { /* keep the defaults */ }
   document.getElementById("brand").textContent = config.name;
-  try { tools = await (await api("/api/tools")).json(); }
-  catch (e) { return main.replaceChildren(h("p", {class: "status error", role: "alert"}, `The tool list could not be loaded. ${e.message}`)); }
+  document.getElementById("signout").addEventListener("click", async () => {
+    await api("/api/logout", new FormData()).catch(() => {});
+    location.hash = "#/";
+    await refresh();
+  });
   search.addEventListener("input", () => { if (location.hash.length > 2) location.hash = "#/"; else route(); });
   search.addEventListener("keydown", e => { if (e.key === "Escape") { search.value = ""; search.dispatchEvent(new Event("input")); } });
   window.addEventListener("keydown", e => {  // "/" jumps to the search box, as on most sites
@@ -674,7 +849,7 @@ async function start() {
   // a file dropped next to a drop zone must not make the browser leave the page
   for (const type of ["dragover", "drop"]) window.addEventListener(type, e => e.preventDefault());
   window.addEventListener("hashchange", route);
-  route();
+  await enter(null);
 }
 
 start();

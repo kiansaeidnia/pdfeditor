@@ -2,13 +2,29 @@
 import io
 import os
 import shutil
+import tempfile
 import zipfile
 
 import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
+os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="pdfeditor-test-")  # before the app is imported: never ./data
+from app import settings  # noqa: E402
+from app.main import app  # noqa: E402
+
+OPEN_SETTINGS = {"login": "none", "user": "", "hash": "", "secret": "test", "app_url": "",
+                 "smtp": {"host": "", "port": 587, "user": "", "password": "", "sender": ""}}
+
+
+@pytest.fixture(autouse=True)
+def fresh_settings(tmp_path, monkeypatch, client):
+    """Every test starts on a set-up server with no sign-in; tests about setup or sign-in change that."""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    for name in ("AUTH_PASSWORD", "SMTP_HOST"):
+        monkeypatch.delenv(name, raising=False)
+    settings.save(OPEN_SETTINGS)
+    client.cookies.clear()
 
 
 def make_pdf(pages=3, text="Page {n}", rotation=0, width=595, height=842) -> bytes:

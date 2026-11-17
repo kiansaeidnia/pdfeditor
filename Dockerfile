@@ -16,9 +16,10 @@ RUN apt-get update \
       fonts-dejavu-core fonts-liberation fonts-droid-fallback \
  && rm -rf /var/lib/apt/lists/*
 
-# LibreOffice and fontconfig need a writable home
-RUN useradd --create-home --uid 1000 app
-ENV HOME=/home/app PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 WORKERS=2
+# LibreOffice and fontconfig need a writable home; /data keeps the settings chosen in the first-run setup
+RUN useradd --create-home --uid 1000 app && mkdir /data && chown app:app /data
+ENV HOME=/home/app PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 WORKERS=2 DATA_DIR=/data
+VOLUME /data
 
 WORKDIR /srv
 COPY requirements.txt .
