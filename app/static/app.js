@@ -740,13 +740,13 @@ function setupView() {
       h("p", {class: "empty"}, "You can change this later on the admin page.")]},
     {name: "Storage", when: accounts, page: () => [h("h2", {tabIndex: -1}, "Where accounts and files are kept"),
       h("h3", {}, "Accounts"),
-      preset.database ? h("p", {}, "In the Postgres database set by the server (DATABASE_URL).")
+      preset.database ? h("p", {}, "In the Postgres database chosen in the server's settings file.")
         : [choices("db", "Where accounts are kept", [
           ["sqlite", "A database file on this server", "SQLite, kept in the data volume. Nothing to set up."],
           ["postgres", "A Postgres database", "For a database you already run or back up."],
         ], () => st.db, v => { st.db = v; }, draw), st.db === "postgres" && dbFields],
       h("h3", {}, "Files"),
-      preset.storage ? h("p", {}, `In the S3 bucket “${preset.storage}” set by the server.`)
+      preset.storage ? h("p", {}, `In the S3 bucket “${preset.storage}” chosen in the server's settings file.`)
         : [choices("files", "Where files are kept", [
           ["local", "This server's disk", "Kept in the data volume."],
           ["s3", "S3-compatible storage", "Amazon S3, Cloudflare R2, Backblaze B2, MinIO and others."],
