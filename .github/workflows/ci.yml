@@ -22,6 +22,11 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
+      - name: Check the compose file, with and without the bundled Postgres and S3
+        run: |
+          docker compose config -q
+          COMPOSE_PROFILES=postgres,s3 docker compose config -q
+
       - name: Build the image
         uses: docker/build-push-action@v7
         with:

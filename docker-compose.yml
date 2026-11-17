@@ -1,4 +1,9 @@
 # Settings and secrets come from an optional .env file next to this one (KEY=value lines); keep it out of git.
+#
+# Out of the box this runs pdfeditor alone: accounts in SQLite and users' files on disk, both in the data volume.
+# Two optional services can run next to it. Each starts only when its profile is on, e.g. in .env:
+#   COMPOSE_PROFILES=postgres,s3
+# and .env.example has the lines that make the app use them without asking in the setup.
 services:
   pdfeditor:
     build:
@@ -7,7 +12,7 @@ services:
         OCR_LANGS: ${OCR_LANGS:-eng}  # Tesseract languages baked into the image, e.g. "eng deu fra"
     image: pdfeditor
     ports:
-      # Reachable from this machine only by default. BIND=0.0.0.0 opens it to the network: choose a sign-in in setup first.
+      # Reachable from this machine only by default. BIND=0.0.0.0 opens it to the network: choose accounts in setup first.
       - "${BIND:-127.0.0.1}:${PORT:-8080}:8080"
     restart: unless-stopped
     volumes:
@@ -24,10 +29,17 @@ services:
       S3_REGION: ${S3_REGION:-}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+    depends_on:  # only when those profiles are on
+      postgres:
+        condition: service_healthy
+        required: false
+      s3:
+        condition: service_started
+        required: false
 
-  # Optional Postgres, started only with: docker compose --profile postgres up -d
-  # Then use this address in the setup: postgresql://pdfeditor:<POSTGRES_PASSWORD>@postgres:5432/pdfeditor
-  # It has no published port, so only the app can reach it.
+  # Optional Postgres for accounts (profile "postgres"). The app's address for it:
+  #   postgresql://pdfeditor:<POSTGRES_PASSWORD>@postgres:5432/pdfeditor
+  # No published port: only the app can reach it.
   postgres:
     image: postgres:17-alpine
     profiles: [postgres]
@@ -38,7 +50,29 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
     volumes:
       - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdfeditor -d pdfeditor"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # Optional S3-compatible storage for users' files (profile "s3"): Versity S3 Gateway, keeping each object as a
+  # plain file in the s3 volume. It comes with the bucket "pdfeditor". The app's settings for it:
+  #   endpoint http://s3:7070, bucket pdfeditor, access key <S3_ACCESS_KEY>, secret key <S3_SECRET_KEY>
+  # No published port: only the app can reach it.
+  s3:
+    image: versity/versitygw:v1.10.0
+    profiles: [s3]
+    restart: unless-stopped
+    entrypoint: sh
+    command: ["-c", "mkdir -p /data/pdfeditor && exec versitygw --port :7070 posix /data"]  # a bucket is a folder
+    environment:
+      ROOT_ACCESS_KEY: ${S3_ACCESS_KEY:-pdfeditor}
+      ROOT_SECRET_KEY: ${S3_SECRET_KEY:-change-me}
+    volumes:
+      - s3:/data
 
 volumes:
   data:
   postgres:
+  s3:

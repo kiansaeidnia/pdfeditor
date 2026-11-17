@@ -120,9 +120,26 @@ The settings are kept in the `data` volume, so they survive restarts and updates
 `docker compose restart`. Accounts and files stay where they are, and an admin address you enter again becomes
 the admin again.
 
-To keep accounts in Postgres without running one yourself, start the bundled one with
-`docker compose --profile postgres up -d` (set `POSTGRES_PASSWORD` in `.env` first) and give the setup
-`postgresql://pdfeditor:<POSTGRES_PASSWORD>@postgres:5432/pdfeditor`.
+#### Bundled Postgres and S3
+
+`docker-compose.yml` can also run a Postgres for accounts and an S3-compatible store for users' files
+([Versity S3 Gateway](https://github.com/versity/versitygw), which keeps each file as a plain file in its volume),
+next to the app and reachable only by it. Both are off until you turn them on in `.env`:
+
+```bash
+COMPOSE_PROFILES=postgres,s3
+POSTGRES_PASSWORD=pick-a-password
+DATABASE_URL=postgresql://pdfeditor:${POSTGRES_PASSWORD}@postgres:5432/pdfeditor
+S3_BUCKET=pdfeditor
+S3_ENDPOINT=http://s3:7070
+S3_ACCESS_KEY=pdfeditor
+S3_SECRET_KEY=pick-another-password
+```
+
+Then `docker compose up -d`. The setup shows both as already chosen. The same block is in `.env.example`; keep only
+the Postgres or only the S3 lines to use one of them. Set the passwords before the first start: they are fixed when
+the volumes are created. Without `DATABASE_URL` and `S3_*` the services still run, and you can type their addresses
+into the setup instead.
 
 ### Accounts and My files
 
@@ -375,7 +392,8 @@ Set these in a `.env` file next to `docker-compose.yml` (copy `.env.example`).
 | `OCR_LANGS` | `eng` | Tesseract languages built into the image, e.g. `eng deu fra` (build-time). |
 | `DATABASE_URL` | empty | Optional: a `postgresql://` address. When set, the setup doesn't ask where accounts are kept. |
 | `S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | empty | Optional: an S3 bucket for users' files. When set, the setup doesn't ask. |
-| `POSTGRES_PASSWORD` | `change-me` | Password of the bundled Postgres (`--profile postgres` only). |
+| `COMPOSE_PROFILES` | empty | `postgres`, `s3` or `postgres,s3`: run the [bundled services](#bundled-postgres-and-s3). |
+| `POSTGRES_PASSWORD` | `change-me` | Password of the bundled Postgres. |
 
 Sign-in, sign-up and the mail server are chosen in the first-run setup, not here.
 
