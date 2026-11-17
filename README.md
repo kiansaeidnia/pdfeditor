@@ -98,6 +98,21 @@ Open <http://localhost:8080>. The first build downloads LibreOffice and takes a 
 > devices, set `AUTH_PASSWORD` **and** `BIND=0.0.0.0` in a `.env` file (copy `.env.example`), then run
 > `docker compose up -d` again. See [Security notes](#security-notes) before exposing it.
 
+### Ready-made image
+
+Every commit on `main` that passes CI is published to the private registry at `registry.saeidnia.com` as
+`pdfeditor:latest` and `pdfeditor:<short commit hash>`. A git tag such as `v1.2.0` is published under its own name.
+Pull requests never publish.
+
+```bash
+docker login registry.saeidnia.com
+docker pull registry.saeidnia.com/pdfeditor:latest
+```
+
+The registry sits behind a Cloudflare Tunnel, which refuses any single upload over 100 MB, so CI uploads the
+image in 50 MB chunks with [regctl](https://github.com/regclient/regclient) instead of `docker push`. Pulling is
+unaffected.
+
 ## The tools
 
 Open a category to see what is in it. The **API id** is the last part of the tool's address: `POST /api/tools/<id>`.
