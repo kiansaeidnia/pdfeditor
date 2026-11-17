@@ -452,6 +452,31 @@ function editor() {
   const look = (s, size) => `${s.italic ? "italic " : ""}${s.bold ? "bold " : ""}${size}px "${s.uses}", ` +
     (s.mono ? '"Courier New", monospace' : s.serif ? '"Times New Roman", Times, serif' : "Arial, Helvetica, sans-serif");
   const sameBox = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 0.01);
+  // Letters often reach past their box (accents, italics, tails), so old text is hidden a little beyond it
+  const around = s => { const [x0, y0, x1, y1] = s.rect, dy = (y1 - y0) * 0.15; return [x0 - 1.5, y0 - dy, x1 + 1.5, y1 + dy]; };
+  // The colour behind a piece of text, read from the page picture just outside it: the old text is hidden in it,
+  // so text on a coloured band stays on that band (the server keeps the band, removing only the letters)
+  let picture = null;  // the shown page's picture, to read colours from; made when first needed
+  function backdrop(s) {
+    if (s.paper || s.backdrop) return s.paper ?? s.backdrop;
+    if (!picture) {
+      picture = h("canvas", {width: shown.naturalWidth, height: shown.naturalHeight}).getContext("2d", {willReadFrequently: true});
+      picture.drawImage(shown, 0, 0);
+    }
+    const [x0, y0, x1, y1] = around(s).map(v => Math.round(v / PT)), groups = new Map();  // near colours together
+    for (const y of [y0 - 2, y1 + 2]) {  // a line of pixels above and one below
+      if (y < 0 || y >= picture.canvas.height) continue;
+      const row = picture.getImageData(Math.max(0, x0), y, Math.max(1, Math.min(picture.canvas.width, x1) - Math.max(0, x0)), 1).data;
+      for (let i = 0; i < row.length; i += 4) {
+        const key = (row[i] >> 4) * 256 + (row[i + 1] >> 4) * 16 + (row[i + 2] >> 4), g = groups.get(key) ?? [0, 0, 0, 0];
+        for (let j = 0; j < 3; j++) g[j] += row[i + j];
+        g[3]++;
+        groups.set(key, g);
+      }
+    }
+    const top = [...groups.values()].sort((a, b) => b[3] - a[3])[0];  // the commonest, as its true average colour
+    return s.backdrop = top ? `rgb(${top.slice(0, 3).map(v => Math.round(v / top[3])).join(",")})` : "#ffffff";
+  }
 
   // Redraw the page picture and every pending edit on it, the way the server will draw them
   function paint() {
@@ -466,9 +491,9 @@ function editor() {
       ctx.globalAlpha = o.type === "highlight" ? 0.35 : 1;
       ctx.fillStyle = ctx.strokeStyle = o.type === "whiteout" ? "#ffffff" : o.color ?? "#000000";
       if (o.type === "retext") {  // the old text covered, the new one written on its baseline in a lookalike font
-        const [x0, y0, x1, y1] = o.rect, pad = o.span.scanned ? [1.5, (y1 - y0) * 0.15] : [0.5, 0];
-        ctx.fillStyle = o.span.paper ?? "#ffffff";
-        ctx.fillRect(x0 - pad[0], y0 - pad[1], x1 - x0 + 2 * pad[0], y1 - y0 + 2 * pad[1]);
+        const [x0, y0, x1, y1] = around(o.span);
+        ctx.fillStyle = backdrop(o.span);
+        ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
         ctx.fillStyle = o.color;
         ctx.font = look(o.span, o.span.size);
         ctx.fillText(o.text, o.span.baseline[0], o.span.baseline[1]);
@@ -513,6 +538,7 @@ function editor() {
       if (page !== n || file !== f) return;  // the user moved on while this page was loading
       shown = img;
       spans = null;
+      picture = null;
       cv.width = img.naturalWidth;
       cv.height = img.naturalHeight;
       paint();
@@ -551,8 +577,10 @@ function editor() {
       if (!s) return tell(status, spans ? "There's no text there. Click on a word inside a dashed box." : "Still reading this page's text…");
       const k = cv.clientWidth / cv.width / PT, before = ops.find(o => o.type === "retext" && o.page === page && sameBox(o.rect, s.rect));
       Object.assign(retyping, {hidden: false, value: before ? before.text : s.text, span: s});
-      Object.assign(retyping.style, {left: `${(s.rect[0] - 1) * k}px`, top: `${(s.rect[1] - 1) * k}px`, color: s.color, font: look(s, s.size * k),
-        width: `${Math.max((s.rect[2] - s.rect[0]) * k + 48, 120)}px`});
+      // a solid box over the old text, in the colour behind it, so only what is being typed shows
+      const [x0, y0, x1, y1] = around(s);
+      Object.assign(retyping.style, {left: `${x0 * k}px`, top: `${y0 * k}px`, height: `${(y1 - y0) * k}px`, color: s.color,
+        font: look(s, s.size * k), background: backdrop(s), width: `${Math.max((x1 - x0) * k + 48, 120)}px`});
       const same = s.font.replace(/[^a-z0-9]/gi, "").toLowerCase() === s.uses.replace(/[^a-z0-9]/gi, "").toLowerCase();
       tell(status, (s.scanned ? `Text read from the scan. The new text is written over it in ${s.uses}, in the scan's ink colour.`
         : `${s.font}, ${s.size} pt. ` + (same ? "Its own font is kept." : `Written in ${s.uses}, which matches it.`)) +

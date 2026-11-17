@@ -337,6 +337,10 @@ def _installed() -> dict:
     for d in FONT_DIRS:
         for path in sorted(Path(d).rglob("*")) if Path(d).is_dir() else []:
             if path.suffix.lower() in (".ttf", ".otf"):
+                try:  # the name inside the file says the style; file names often don't ("timesi.ttf")
+                    out.setdefault(_family(pymupdf.Font(fontfile=str(path)).name), str(path))
+                except Exception:  # a file FreeType can't read is skipped
+                    continue
                 out.setdefault(_family(path.stem), str(path))
     return out
 
@@ -352,8 +356,8 @@ def font_for(name: str, flags: int = 0) -> tuple[pymupdf.Font, str]:
     bold, italic = bold or bool(flags & 16), italic or bool(flags & 2)
     kind = "liberationmono" if flags & 8 else "liberationserif" if flags & 4 else "liberationsans"
     fonts = _installed()
-    for fam in [family, *TWINS.get(family, []), kind]:
-        for style in ((bold, italic), (bold, False), (False, False)):  # same family in another style beats another family
+    for style in ((bold, italic), (bold, False), (False, False)):  # a twin in the right style beats the family in the wrong one
+        for fam in [family, *TWINS.get(family, []), kind]:
             if (fam, *style) in fonts:
                 f = _font_file(fonts[(fam, *style)])
                 return f, f.name
