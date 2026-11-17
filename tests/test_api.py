@@ -72,6 +72,13 @@ def test_ui_gets_security_headers_and_config(client):
     page = client.get("/")
     assert "script-src 'self'" in page.headers["content-security-policy"] and page.headers["x-content-type-options"] == "nosniff"
     assert page.headers["cache-control"] == "no-cache"
+    # the script and stylesheet addresses change with their content, so a cache that ignores no-cache can't serve an old one
+    import hashlib, re
+    from app.main import STATIC
+    for name in ("app.js", "style.css"):
+        tag = re.search(name.replace(".", r"\.") + r"\?v=([0-9a-f]+)", page.text).group(1)
+        assert tag == hashlib.sha256((STATIC / name).read_bytes()).hexdigest()[:12]
+        assert client.get(f"/{name}?v={tag}").status_code == 200
     assert "content-security-policy" not in client.get("/api/docs").headers  # the docs page loads a CDN script
     assert client.get("/api/config").json() == {"name": "pdfeditor", "max_upload_mb": 200, "setup": False, "login": "none",
                                                "user": None, "email": False, "signup": None}

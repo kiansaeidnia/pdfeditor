@@ -1,5 +1,6 @@
 """FastAPI app: one endpoint per registered tool, a pipeline endpoint, the guard in front of everything, the web UI.
 Setup, accounts and file libraries are in accounts.py."""
+import hashlib
 import inspect
 import io
 import logging
@@ -13,7 +14,7 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.params import Form as FormInfo
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, TypeAdapter
@@ -184,4 +185,19 @@ async def database_down(request: Request, e: Exception):
 
 
 app.include_router(accounts.router)
-app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")
+STATIC = Path(__file__).parent / "static"
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
+def index():
+    """The page, with its script and stylesheet addresses tagged by their content: Cloudflare tells browsers to keep
+    .js and .css for hours whatever we say, so a new version must have a new address to be fetched at once."""
+    html = (STATIC / "index.html").read_text("utf-8")
+    for name in ("app.js", "style.css"):
+        tag = hashlib.sha256((STATIC / name).read_bytes()).hexdigest()[:12]
+        html = html.replace(f'"{name}"', f'"{name}?v={tag}"')
+    return HTMLResponse(html)
+
+
+app.mount("/", StaticFiles(directory=STATIC, html=True), name="ui")
